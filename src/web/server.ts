@@ -8,6 +8,7 @@ import { adminRouter } from './routes/admin.js';
 import { consoleRouter } from './routes/console.js';
 import { healthRouter } from './routes/health.js';
 import { payRouter } from './routes/pay.js';
+import { webhookRouter } from './routes/webhook.js';
 
 const log = logger.child({ mod: 'web' });
 const here = dirname(fileURLToPath(import.meta.url));
@@ -18,10 +19,20 @@ const here = dirname(fileURLToPath(import.meta.url));
  */
 export function createServer() {
   const app = express();
-  app.use(express.json({ limit: '256kb' }));
+  app.use(
+    express.json({
+      limit: '256kb',
+      // Keep the raw bytes: Meta signs the exact body, and re-serialising the
+      // parsed object would not reproduce the same signature.
+      verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.disable('x-powered-by');
 
   app.use(healthRouter());
+  app.use(webhookRouter());
   app.use(adminRouter());
   app.use(payRouter());
   app.use(consoleRouter());

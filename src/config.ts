@@ -31,7 +31,14 @@ const schema = z.object({
   // App
   PORT: z.coerce.number().int().positive().default(3000),
   PUBLIC_BASE_URL: z.string().default('http://localhost:3000'),
-  CHANNEL: z.enum(['whatsapp', 'cli', 'memory']).default('whatsapp'),
+  // 'cloud' = Meta's official WhatsApp Cloud API; 'whatsapp' = Baileys.
+  CHANNEL: z.enum(['whatsapp', 'cloud', 'cli', 'memory']).default('whatsapp'),
+
+  // WhatsApp Cloud API (CHANNEL=cloud)
+  WA_CLOUD_TOKEN: z.string().default(''),
+  WA_CLOUD_PHONE_NUMBER_ID: z.string().default(''),
+  WA_CLOUD_VERIFY_TOKEN: z.string().default('waypoint-verify'),
+  WA_CLOUD_APP_SECRET: z.string().default(''),
   ADMIN_TOKEN: z.string().min(8).default('waypoint-dev-admin-token'),
   OWNER_WHATSAPP: z.string().default(''),
   WA_PAIRING_NUMBER: z.string().default(''),
@@ -66,6 +73,7 @@ export const config = {
   hasLlm: env.LLM_API_KEY.length > 0,
   hasDb: env.DATABASE_URL.length > 0,
   hasSmtp: env.SMTP_HOST.length > 0 && env.SMTP_USER.length > 0 && env.SMTP_PASS.length > 0,
+  hasCloudApi: env.WA_CLOUD_TOKEN.length > 0 && env.WA_CLOUD_PHONE_NUMBER_ID.length > 0,
 } as const;
 
 export type Config = typeof config;

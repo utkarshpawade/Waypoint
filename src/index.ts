@@ -3,6 +3,7 @@ import { logger } from './logger.js';
 import { getStore } from './db/index.js';
 import { setActiveChannel } from './channels/registry.js';
 import { BaileysChannel } from './channels/baileys.js';
+import { CloudApiChannel } from './channels/cloud-api.js';
 import { CliChannel } from './channels/cli.js';
 import { MemoryChannel } from './channels/memory.js';
 import { handleTurn } from './conversation/engine.js';
@@ -14,6 +15,8 @@ const log = logger.child({ mod: 'boot' });
 
 function makeChannel(): Channel {
   switch (config.CHANNEL) {
+    case 'cloud':
+      return new CloudApiChannel();
     case 'cli':
       return new CliChannel();
     case 'memory':

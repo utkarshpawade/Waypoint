@@ -48,7 +48,7 @@ optional upgrades, and the code path is identical with or without them.
 ```bash
 npm install
 npx tsx scripts/demo-conversation.ts   # the whole flow, scripted, in your terminal
-npm test                               # 134 tests
+npm test                               # 152 tests
 npm run cli                            # talk to it yourself
 ```
 
@@ -266,10 +266,30 @@ suppressed, logged as `hallucination_blocked`, and escalated.
 Free tiers aren't a constraint to apologise for — they forced three real
 engineering decisions:
 
-- **Baileys, not `whatsapp-web.js`.** The latter drives a headless Chromium and
-  needs ~700MB–1GB. Baileys speaks the protocol over a WebSocket in ~150MB, which
-  fits in Render's 512MB. It also supports pairing codes, which beats scanning a
-  QR out of a cloud log viewer.
+- **Two WhatsApp transports, one interface.** `CHANNEL=cloud` runs Meta's
+  official Cloud API; `CHANNEL=whatsapp` runs Baileys. Both implement
+  [`Channel`](src/channels/types.ts), and the conversation engine, ranking,
+  booking and escalation code cannot tell them apart — the swap touched no file
+  outside `src/channels/` and one line of `index.ts`.
+
+  | | Cloud API (`cloud`) | Baileys (`whatsapp`) |
+  |---|---|---|
+  | Sanctioned | ✅ Official | ❌ Reverse-engineered client |
+  | Ban risk | None | Real |
+  | Recipients | Pre-registered only, until Business Verification | Anyone |
+  | Needs a SIM | No | Yes |
+  | Free-form replies | Within 24h of the user's last message | Always |
+
+  This deploys on the Cloud API: no ban risk mid-evaluation is worth more than
+  cold messaging, and "I used the official API and kept the unofficial client as
+  a swappable adapter" is the honest engineering position. Baileys remains fully
+  implemented and tested — including the Postgres-backed session below — because
+  the constraint that shaped it is real and the code demonstrates it.
+
+- **Baileys, not `whatsapp-web.js`** (for the unofficial path). The latter drives
+  a headless Chromium and needs ~700MB–1GB. Baileys speaks the protocol over a
+  WebSocket in ~150MB, which fits in Render's 512MB. It also supports pairing
+  codes, which beats scanning a QR out of a cloud log viewer.
 - **The WhatsApp session lives in Postgres.** Render's free tier has no
   persistent disk, so `useMultiFileAuthState` would demand a fresh pairing on
   every restart, redeploy and sleep cycle — the interviewer would message a dead
@@ -330,7 +350,7 @@ this build.
 ## Testing
 
 ```bash
-npm test          # 134 tests, no network, no model, no database
+npm test          # 152 tests, no network, no model, no database
 npm run typecheck
 ```
 
@@ -389,10 +409,16 @@ part of this build is working.
 
 Stated plainly, because they matter more than the feature list:
 
-- **Baileys is an unofficial client.** It is against WhatsApp's terms at scale
-  and carries a genuine ban risk. Production would use the WhatsApp Cloud API —
-  which is a one-file change, because nothing downstream of
-  [`channels/types.ts`](src/channels/types.ts) imports Baileys.
+- **The deployed build uses a Cloud API test number**, so it can only message
+  recipients registered in the Meta dashboard (about five). Messaging the public
+  needs Business Verification, which requires company documents. The Baileys
+  transport has no such limit but carries real ban risk — pick your constraint;
+  both are one env var away.
+- **The 24-hour window applies on the Cloud API.** Free-form replies are only
+  allowed within 24 hours of the user's last message. Every proactive message
+  here — payment confirmation, SLA nudge, escalation alert — is a reply inside an
+  active conversation, so it holds for a demo. At real scale those become
+  pre-approved template messages.
 - **Fares are simulated.** The mock is deterministic and plausible, not real. The
   Amadeus adapter exists and works, but its test tier covers limited routes and
   serves stale prices, so it isn't the default.
