@@ -323,6 +323,14 @@ const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
 const PHONE_RE = /(?:\+?\d{1,3}[\s-]?)?[6-9]\d{9}\b/;
 const PASSPORT_RE = /\b([A-PR-WY][0-9]{7})\b/i;
 
+/**
+ * Words that belong to a *different* passenger field. Stripped before the
+ * bare-line name heuristic runs, so volunteering several fields in one message
+ * doesn't glue them onto the name.
+ */
+const FIELD_WORDS_RE =
+  /\b(male|female|man|woman|mr|mrs|ms|miss|dr|gender|dob|date of birth|born|email|e-?mail|phone|mobile|number|contact|passport|expires?|expiry|valid|till|until|nationality|citizen|indian|american|british|and|my|name|is|this)\b/gi;
+
 export function extractPassengerFields(text: string, now?: DateTime): PassengerDraft {
   const draft: PassengerDraft = {};
   const lower = text.toLowerCase();
@@ -347,10 +355,15 @@ export function extractPassengerFields(text: string, now?: DateTime): PassengerD
   if (named) draft.fullName = titleCase(named[1].trim());
   else {
     // A bare line of 2-4 alphabetic words, with nothing else in it, is a name.
+    // People volunteer several fields at once ("Priya Sharma 03/11/1994 female"),
+    // so every other field's own vocabulary has to come out first — otherwise
+    // the passenger is booked as "Priya Sharma Female".
     const stripped = text
       .replace(EMAIL_RE, ' ')
       .replace(PHONE_RE, ' ')
+      .replace(PASSPORT_RE, ' ')
       .replace(/\b\d[\d/.-]*\b/g, ' ')
+      .replace(FIELD_WORDS_RE, ' ')
       .trim();
     const words = stripped.split(/\s+/).filter(Boolean);
     if (

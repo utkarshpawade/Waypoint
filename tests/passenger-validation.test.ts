@@ -90,6 +90,26 @@ describe('passenger validation', () => {
   });
 });
 
+describe('date handling', () => {
+  it('keeps a date of birth as a plain date, with no timezone shift', () => {
+    // A DOB is a calendar date, not an instant. Turning it into a Date and
+    // back through toISOString() shifts it a day behind in any timezone east
+    // of UTC — and a DOB that no longer matches the passport fails at the gate.
+    const r = validatePassengerDraft({ ...GOOD, dateOfBirth: '1992-04-12' }, DOMESTIC);
+    expect(r.valid).toBe(true);
+    expect(r.value?.dateOfBirth).toBe('1992-04-12');
+    expect(new Date(r.value!.dateOfBirth).toISOString().slice(0, 10)).toBe('1992-04-12');
+  });
+
+  it('keeps a passport expiry exact too', () => {
+    const r = validatePassengerDraft(
+      { ...GOOD, passportNo: 'M1234567', passportExpiry: '2031-08-20', nationality: 'Indian' },
+      INTERNATIONAL,
+    );
+    expect(r.value?.passportExpiry).toBe('2031-08-20');
+  });
+});
+
 describe('tool argument validation', () => {
   it('accepts valid search arguments and uppercases codes', () => {
     const r = validateToolArgs('search_flights', { origin: 'blr', destination: 'dxb', departDate: '2026-12-15' });

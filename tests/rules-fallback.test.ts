@@ -172,6 +172,23 @@ describe('passenger fields', () => {
     expect(extractPassengerFields('cheaper morning flight', NOW).fullName).toBeUndefined();
   });
 
+  it('does not glue another field onto the name when several are volunteered', () => {
+    // People answer "full name and date of birth?" with everything at once.
+    const a = extractPassengerFields('Priya Sharma 03/11/1994 female', NOW);
+    expect(a.fullName).toBe('Priya Sharma');
+    expect(a.gender).toBe('F');
+    expect(a.dateOfBirth).toBe('1994-11-03');
+
+    const b = extractPassengerFields('Rahul Sharma male 9876543210 rahul@example.com', NOW);
+    expect(b.fullName).toBe('Rahul Sharma');
+    expect(b.phone).toBe('9876543210');
+
+    const c = extractPassengerFields('Arjun Mehta passport M1234567 indian', NOW);
+    expect(c.fullName).toBe('Arjun Mehta');
+    expect(c.passportNo).toBe('M1234567');
+    expect(c.nationality).toBe('Indian');
+  });
+
   it('reads a date of birth as a past date, not a departure date', () => {
     const p = extractPassengerFields('12/04/1992', NOW);
     expect(p.dateOfBirth).toBe('1992-04-12');

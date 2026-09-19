@@ -2,6 +2,18 @@ import pg from 'pg';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
+/**
+ * Return DATE columns as the plain 'YYYY-MM-DD' string they are.
+ *
+ * By default node-postgres turns a DATE into a JS Date at *local* midnight.
+ * Anything that then formats it via toISOString() shifts it backwards by the
+ * UTC offset — so a passenger born on 12/04/1992 comes back out of the database
+ * as 1992-04-11 in Asia/Kolkata. A date of birth that no longer matches the
+ * passport is a booking that fails at the airport, so dates never become
+ * timestamps here.
+ */
+pg.types.setTypeParser(pg.types.builtins.DATE, (value: string) => value);
+
 let pool: pg.Pool | null = null;
 
 export function getPool(): pg.Pool {
