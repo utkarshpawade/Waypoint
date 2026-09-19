@@ -7,3 +7,6 @@ auth_info_baileys/
 .DS_Store
 coverage/
 .vscode/
+
+# Unrelated project that happens to sit in this folder
+ChhotuAI-main/
