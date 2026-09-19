@@ -42,6 +42,13 @@ const schema = z.object({
   ADMIN_TOKEN: z.string().min(8).default('waypoint-dev-admin-token'),
   OWNER_WHATSAPP: z.string().default(''),
   WA_PAIRING_NUMBER: z.string().default(''),
+  /**
+   * Comma-separated numbers the bot will answer. Empty = answer everyone.
+   * Set it when the bot shares a number with a human: the interviewer gets a
+   * cold, working bot while everyone else's messages pass straight through to
+   * the person, untouched.
+   */
+  ALLOWED_SENDERS: z.string().default(''),
   ESCALATION_SLA_MINUTES: z.coerce.number().int().positive().default(10),
   BUSINESS_HOURS: z
     .string()
@@ -74,6 +81,10 @@ export const config = {
   hasDb: env.DATABASE_URL.length > 0,
   hasSmtp: env.SMTP_HOST.length > 0 && env.SMTP_USER.length > 0 && env.SMTP_PASS.length > 0,
   hasCloudApi: env.WA_CLOUD_TOKEN.length > 0 && env.WA_CLOUD_PHONE_NUMBER_ID.length > 0,
+  /** Digits only, so "+91 98765 43210" and "919876543210" are the same entry. */
+  allowedSenders: env.ALLOWED_SENDERS.split(',')
+    .map((s) => s.replace(/\D/g, ''))
+    .filter(Boolean),
 } as const;
 
 export type Config = typeof config;

@@ -30,6 +30,21 @@ const log = logger.child({ mod: 'engine' });
 
 const GREETING = "Hi! I'm Waypoint ✈️ I'll find you the best fare in about a minute.\nWhere from, and where to?";
 
+/**
+ * Is this sender one the bot should answer?
+ *
+ * With ALLOWED_SENDERS empty (the default) the answer is always yes. Setting it
+ * makes the bot deaf to everyone else, which is what makes it safe to run on a
+ * number a human also uses: the interviewer gets a working bot, and everyone
+ * else's messages arrive as ordinary messages to the person.
+ */
+export function isAllowedSender(channelUserId: string): boolean {
+  if (!config.allowedSenders.length) return true;
+  const digits = channelUserId.split(':')[0].split('@')[0].replace(/\D/g, '');
+  if (!digits) return true; // cli / memory channels have no number
+  return config.allowedSenders.some((allowed) => digits === allowed || digits.endsWith(allowed));
+}
+
 /** One user turn, end to end. Every transition below is the FSM's, not the model's. */
 export async function handleTurn(msg: InboundMessage, channel: Channel): Promise<void> {
   const store = getStore();
@@ -38,6 +53,11 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
   if (isOwner(msg.channelUserId) && looksLikeCommand(msg.text)) {
     const result = await handleOwnerCommand(msg.text);
     if (result.handled && result.reply) await channel.send(msg.channelUserId, result.reply);
+    return;
+  }
+
+  if (!isAllowedSender(msg.channelUserId)) {
+    log.info({ from: maskId(msg.channelUserId) }, 'sender not in ALLOWED_SENDERS — staying silent');
     return;
   }
 
