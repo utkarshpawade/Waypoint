@@ -80,7 +80,10 @@ class LlmClient {
           model: config.LLM_MODEL,
           messages,
           temperature: opts.temperature ?? 0.3,
-          max_tokens: opts.maxTokens ?? 600,
+          // Reasoning models (Gemini 3.x Flash, gpt-oss) count their internal
+          // thinking against this budget — a 58-token answer can cost 700.
+          // Too low and the JSON comes back truncated.
+          max_tokens: opts.maxTokens ?? 1200,
         });
         const text = res.choices[0]?.message?.content ?? '';
         this.noteSuccess();
@@ -99,7 +102,7 @@ class LlmClient {
   }
 
   /** Completion constrained to a JSON object. Returns null if it can't be parsed. */
-  async chatJson<T = Record<string, unknown>>(messages: ChatMessage[], maxTokens = 700): Promise<T | null> {
+  async chatJson<T = Record<string, unknown>>(messages: ChatMessage[], maxTokens = 1500): Promise<T | null> {
     const raw = await this.chat(
       [...messages, { role: 'system', content: 'Respond with a single JSON object and nothing else.' }],
       { maxTokens, temperature: 0.1 },

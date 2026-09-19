@@ -41,7 +41,7 @@ const schema = z.object({
     .regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/, 'BUSINESS_HOURS must look like 09:00-22:00')
     .default('09:00-22:00'),
   BUSINESS_TZ: z.string().default('Asia/Kolkata'),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  LOG_LEVEL: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   PRETTY_LOGS: bool(false),
 });
 

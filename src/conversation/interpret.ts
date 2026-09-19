@@ -85,14 +85,14 @@ export async function interpretTurn(
     ];
     const raw = await llm.chatJson<LlmShape>(messages);
     if (!raw) return decision;
-    return mergeLlm(decision, raw, rules);
+    return mergeLlm(decision, raw, rules, text);
   } catch (err) {
     log.warn({ err: (err as Error).message }, 'llm interpretation unavailable — using rules only');
     return decision;
   }
 }
 
-export function mergeLlm(base: TurnDecision, raw: LlmShape, rules: RulesResult): TurnDecision {
+export function mergeLlm(base: TurnDecision, raw: LlmShape, rules: RulesResult, userText = ''): TurnDecision {
   const out: TurnDecision = { ...base, source: 'llm+rules' };
 
   if (typeof raw.intent === 'string' && VALID_INTENTS.includes(raw.intent as Intent)) {
@@ -108,7 +108,7 @@ export function mergeLlm(base: TurnDecision, raw: LlmShape, rules: RulesResult):
     if (rules.intent === 'REQUEST_HUMAN' || rules.selection) out.confidence = base.confidence;
   }
 
-  out.trip = mergeTrip(rules.trip, raw.slots ?? {});
+  out.trip = mergeTrip(rules.trip, raw.slots ?? {}, userText);
   out.passenger = mergePassenger(rules.passenger, raw.passenger ?? {});
 
   if (raw.tool && isToolName(raw.tool)) {
@@ -133,7 +133,11 @@ export function mergeLlm(base: TurnDecision, raw: LlmShape, rules: RulesResult):
  * and only if it survives validation — an unknown IATA code or a date in the
  * past is dropped, not asked about.
  */
-export function mergeTrip(rulesTrip: Partial<TripSlots>, llmSlots: Record<string, unknown>): Partial<TripSlots> {
+export function mergeTrip(
+  rulesTrip: Partial<TripSlots>,
+  llmSlots: Record<string, unknown>,
+  userText = '',
+): Partial<TripSlots> {
   const out: Partial<TripSlots> = { ...rulesTrip };
 
   for (const key of ['origin', 'destination'] as const) {
@@ -165,7 +169,16 @@ export function mergeTrip(rulesTrip: Partial<TripSlots>, llmSlots: Record<string
     const p = llmSlots.preference.toUpperCase();
     if (['CHEAPEST', 'FASTEST', 'BEST_VALUE', 'COMFORT'].includes(p)) out.preference = p as TripSlots['preference'];
   }
-  if (out.budgetMax === undefined && typeof llmSlots.budgetMax === 'number' && llmSlots.budgetMax > 500) {
+  // A budget is a number the user said. Asked for "anything cheaper", a model
+  // will happily invent a ceiling — and the bot would then honestly report that
+  // nothing meets a limit the user never set. If there is no digit in their
+  // message, there is no budget.
+  if (
+    out.budgetMax === undefined &&
+    typeof llmSlots.budgetMax === 'number' &&
+    llmSlots.budgetMax > 500 &&
+    /\d/.test(userText)
+  ) {
     out.budgetMax = Math.round(llmSlots.budgetMax);
   }
   if (out.nonStopOnly === undefined && typeof llmSlots.nonStopOnly === 'boolean') {

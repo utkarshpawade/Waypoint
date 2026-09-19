@@ -497,22 +497,27 @@ function collectRefinement(session: SessionRecord, d: TurnDecision): string | nu
     adults: d.trip.adults,
   };
 
-  if (src.nonStopOnly !== undefined) {
+  // Only report what actually changed. The model likes to restate slots it was
+  // not asked about ("stops allowed" when the user only said "cheaper"), and
+  // echoing those back reads like the bot misheard.
+  // `undefined` and `false` both mean "no non-stop filter", so a model that
+  // helpfully restates nonStopOnly:false is not a change worth announcing.
+  if (src.nonStopOnly !== undefined && Boolean(src.nonStopOnly) !== Boolean(filters.nonStopOnly)) {
     filters.nonStopOnly = src.nonStopOnly;
     t.nonStopOnly = src.nonStopOnly;
     applied.push(src.nonStopOnly ? 'non-stop only' : 'stops allowed');
   }
-  if (src.maxPrice !== undefined) {
+  if (src.maxPrice !== undefined && src.maxPrice !== filters.maxPrice) {
     filters.maxPrice = src.maxPrice;
     t.budgetMax = src.maxPrice;
     applied.push(`under ${formatINR(src.maxPrice)}`);
   }
-  if (src.preference !== undefined) {
+  if (src.preference !== undefined && src.preference !== filters.preference) {
     filters.preference = src.preference as typeof filters.preference;
     t.preference = src.preference as typeof t.preference;
     applied.push(src.preference === 'CHEAPEST' ? 'cheapest first' : src.preference.toLowerCase().replace('_', ' '));
   }
-  if (src.departWindow !== undefined) {
+  if (src.departWindow !== undefined && !sameWindow(src.departWindow, filters.departWindow)) {
     filters.departWindow = src.departWindow;
     t.departWindow = src.departWindow;
     applied.push(`departing ${src.departWindow.earliest ?? '00:00'}–${src.departWindow.latest ?? '23:59'}`);
@@ -527,6 +532,13 @@ function collectRefinement(session: SessionRecord, d: TurnDecision): string | nu
     payload: { filters: applied },
   });
   return `Re-ranking for *${applied.join(', ')}* — no new search needed 👇`;
+}
+
+function sameWindow(
+  a: { earliest?: string; latest?: string } | undefined,
+  b: { earliest?: string; latest?: string } | undefined,
+): boolean {
+  return a?.earliest === b?.earliest && a?.latest === b?.latest;
 }
 
 async function selectOption(session: SessionRecord, index: number): Promise<string[]> {

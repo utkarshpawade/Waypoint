@@ -47,7 +47,7 @@ Recent transcript:
 ${transcript}`,
         },
       ],
-      400,
+      1200,
     );
 
     if (raw?.situation) {

@@ -10,6 +10,12 @@ export class MemoryChannel implements Channel {
   /** Everything the bot sent, in order: [to, text]. */
   readonly sent: { to: string; text: string }[] = [];
   private seq = 0;
+  /**
+   * Message ids are unique per instance. Against a persistent store the
+   * idempotency guard would otherwise treat a second run's "mem-1" as a replay
+   * of the first run's and silently drop it.
+   */
+  private readonly runId = Math.random().toString(36).slice(2, 10);
 
   async start(): Promise<void> {}
 
@@ -28,7 +34,7 @@ export class MemoryChannel implements Channel {
       text,
       name: 'Test User',
       timestamp: Date.now(),
-      messageId: `mem-${++this.seq}`,
+      messageId: `mem-${this.runId}-${++this.seq}`,
     };
     await this.handler?.(m);
   }

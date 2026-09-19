@@ -113,9 +113,24 @@ export type ToolValidation =
   | { ok: true; args: unknown }
   | { ok: false; error: string };
 
+/**
+ * Models routinely emit `"maxPrice": null` for optional fields they are not
+ * setting, which zod's `.optional()` rejects. An explicit null means "no
+ * value", so drop those keys before validating rather than failing the tool.
+ */
+function dropNulls(args: unknown): unknown {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
+    if (v === null) continue;
+    out[k] = v && typeof v === 'object' && !Array.isArray(v) ? dropNulls(v) : v;
+  }
+  return out;
+}
+
 export function validateToolArgs(tool: ToolName, args: unknown): ToolValidation {
   const schema = TOOL_SCHEMAS[tool];
-  const parsed = schema.safeParse(args ?? {});
+  const parsed = schema.safeParse(dropNulls(args) ?? {});
   if (parsed.success) return { ok: true, args: parsed.data };
   return { ok: false, error: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
 }

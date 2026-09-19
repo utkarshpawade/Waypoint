@@ -277,11 +277,26 @@ engineering decisions:
   `AuthenticationState` over a `wa_auth` table, serialising through Baileys'
   `BufferJSON` (credentials contain Buffers; plain `JSON.stringify` corrupts them
   silently — that is the single most likely way this breaks).
-- **The model is swappable and optional.** Three env vars move it from Gemini to
-  Groq or OpenRouter. On 429s it backs off, then trips a circuit breaker, then
-  falls back to [`rules-fallback.ts`](src/llm/rules-fallback.ts) — which can drive
-  the entire happy path on its own. The e2e suite runs with no key at all, which
-  is the proof.
+- **The model is swappable and optional.** Three env vars move it between Groq,
+  Gemini and OpenRouter. On 429s it backs off, then trips a circuit breaker,
+  then falls back to [`rules-fallback.ts`](src/llm/rules-fallback.ts) — which can
+  drive the entire happy path on its own. The e2e suite runs with no key at all,
+  which is the proof.
+
+  That portability paid for itself immediately: both model names the plan
+  specified had been retired by the time this was built. Swapping providers was
+  three lines of `.env`. Measured on the same interpretation prompt:
+
+  | Provider | Model | Latency | Note |
+  |---|---|---|---|
+  | **Groq** | `openai/gpt-oss-120b` | **~0.9s** | default — clean JSON first time |
+  | Gemini | `gemini-3.6-flash` | ~5.8s | works, but spends ~600 reasoning tokens per call |
+  | Gemini | `gemini-flash-latest` | ~19.7s | too slow for a chat reply |
+
+  The model sits on the critical path of a WhatsApp reply, so latency decided
+  it. Note the token budget: a reasoning model counts its own thinking against
+  `max_tokens`, so a 58-token answer can cost 700 — set too low, the JSON comes
+  back truncated.
 
 ### 7. The provider can't break the demo
 
@@ -342,8 +357,15 @@ Everything below is free and needs no card.
 
 1. **Neon** → new project → copy the connection string into `DATABASE_URL`.
    Run `npm run db:push`.
-2. **Google AI Studio** → API key → `LLM_API_KEY`. (Optional. Without it the bot
-   runs on rules alone and says less, but still works.)
+2. **Groq** (console.groq.com) → API key → `LLM_API_KEY`, with
+   `LLM_MODEL=openai/gpt-oss-120b`. Google AI Studio works too — see the table
+   above for why Groq is the default. Either is optional: without a key the bot
+   runs on rules alone and says less, but still works.
+
+   Model names go stale. To see what a key can actually reach:
+   ```bash
+   curl -H "Authorization: Bearer $LLM_API_KEY" "$LLM_BASE_URL/models"
+   ```
 3. **Gmail** → 2-Step Verification → App Password → `SMTP_*`. Run
    `npm run email:test -- you@example.com` **now**, not later. If Gmail blocks or
    spam-folders it, swap in a Brevo relay — same code path.

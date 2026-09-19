@@ -31,10 +31,14 @@ const channel = new MemoryChannel();
 setActiveChannel(channel);
 channel.onMessage((m) => handleTurn(m, channel));
 
+// A fresh user each run, so the demo always starts from a clean session even
+// when DATABASE_URL points at a real Postgres.
+const user = `demo-${Date.now().toString(36)}`;
+
 for (const line of script) {
   console.log(`\n\x1b[36muser ▸\x1b[0m ${line}`);
   const before = channel.sent.length;
-  await channel.userSays(line);
+  await channel.userSays(line, user);
   for (const out of channel.sent.slice(before)) {
     const pretty = out.text
       .replace(/\*(.+?)\*/g, '\x1b[1m$1\x1b[0m')
