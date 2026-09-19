@@ -1,0 +1,106 @@
+[
+  {
+    "id": "baggage-domestic",
+    "topic": "baggage",
+    "keywords": ["baggage", "luggage", "check in bag", "checked bag", "kg", "allowance", "weight", "suitcase"],
+    "question": "How much baggage can I carry on a domestic flight?",
+    "answer": "On Indian domestic economy fares the usual allowance is 15kg check-in plus 7kg cabin. Full-service carriers (Vistara, Air India) often allow 20-25kg check-in. Your exact allowance is on the option card and in the itinerary email.",
+    "source": "Waypoint fare rules summary, applies to the offers we quote"
+  },
+  {
+    "id": "baggage-international",
+    "topic": "baggage",
+    "keywords": ["international baggage", "30kg", "gulf baggage", "dubai baggage"],
+    "question": "What is the baggage allowance on international routes?",
+    "answer": "Gulf and long-haul carriers (Emirates, Qatar, Etihad, Singapore Airlines) typically allow 30kg check-in plus 7kg cabin in economy. Low-cost international carriers usually start at 20kg. The allowance for the fare you picked is shown on its option card.",
+    "source": "Waypoint fare rules summary, applies to the offers we quote"
+  },
+  {
+    "id": "web-checkin",
+    "topic": "check-in",
+    "keywords": ["web check in", "check-in", "checkin", "boarding pass", "when can i check in"],
+    "question": "When does web check-in open?",
+    "answer": "Web check-in opens 48 hours before departure for most Indian carriers and 24-48 hours for international ones, and closes 60-120 minutes before departure. You will get the link directly from the airline once the ticket is issued.",
+    "source": "Standard carrier practice; confirm on the airline's site for your flight"
+  },
+  {
+    "id": "airport-arrival-time",
+    "topic": "check-in",
+    "keywords": ["how early", "reach airport", "reporting time", "before departure", "arrive at airport"],
+    "question": "How early should I get to the airport?",
+    "answer": "Plan for 2 hours before a domestic departure and 3 hours before an international one. Airport check-in counters normally close 45-60 minutes before departure.",
+    "source": "Standard carrier practice"
+  },
+  {
+    "id": "infant-lap",
+    "topic": "passengers",
+    "keywords": ["infant", "baby", "lap", "under 2", "toddler seat", "child seat"],
+    "question": "Does my infant need a separate seat?",
+    "answer": "Children under 2 years travel as lap infants on a parent's lap and do not need their own seat. Airlines charge an infant fare (usually around 10% of the adult fare on international routes, a small fixed fee domestically). From the child's 2nd birthday a full seat is required.",
+    "source": "Standard carrier practice; the airline can confirm the exact infant fare"
+  },
+  {
+    "id": "unaccompanied-minor",
+    "topic": "passengers",
+    "keywords": ["unaccompanied minor", "child alone", "kid travelling alone", "umnr"],
+    "question": "Can a child fly alone?",
+    "answer": "Unaccompanied minor travel has carrier-specific rules, forms and fees, and some routes do not accept it at all. I don't make that call myself — I'll put you through to a specialist who can arrange it properly.",
+    "source": "Escalate: policy-sensitive"
+  },
+  {
+    "id": "cancellation",
+    "topic": "changes",
+    "keywords": ["cancel", "cancellation", "refund", "change date", "reschedule", "modify"],
+    "question": "Can I cancel or change my booking?",
+    "answer": "Cancellation and date-change charges depend on the fare family you booked, and refunds are processed by the airline. Since money is involved I won't guess the number — a human specialist will confirm the exact charge for your ticket.",
+    "source": "Escalate: policy-sensitive"
+  },
+  {
+    "id": "visa",
+    "topic": "travel-docs",
+    "keywords": ["visa", "visa on arrival", "do i need a visa", "entry requirement"],
+    "question": "Do I need a visa?",
+    "answer": "Visa rules depend on your passport, destination and purpose of travel, and they change often. I won't guess on something that can stop you at the gate — a specialist will confirm for your exact nationality and route.",
+    "source": "Escalate: policy-sensitive"
+  },
+  {
+    "id": "passport-validity",
+    "topic": "travel-docs",
+    "keywords": ["passport validity", "6 months", "passport expiry", "passport expiring"],
+    "question": "How long must my passport be valid?",
+    "answer": "Most countries require at least 6 months of passport validity from your date of arrival, and at least one blank page. If your passport expires sooner than that, renew before travelling.",
+    "source": "Widely applied international entry norm; confirm with the destination's consulate"
+  },
+  {
+    "id": "seat-selection",
+    "topic": "seats",
+    "keywords": ["seat", "window seat", "aisle", "extra legroom", "choose seat", "seat selection"],
+    "question": "Can I choose my seat?",
+    "answer": "Yes, at web check-in. Most carriers charge for advance seat selection; a free seat is assigned automatically if you skip it. Extra-legroom and emergency-exit rows are always paid.",
+    "source": "Standard carrier practice"
+  },
+  {
+    "id": "payment-methods",
+    "topic": "payment",
+    "keywords": ["pay", "payment", "upi", "card", "how do i pay", "payment link"],
+    "question": "How do I pay?",
+    "answer": "I email you a secure payment link with the itinerary. The quote is held for 30 minutes; the ticket is issued only once payment completes. Note: in this demo build the payment page is simulated, not a live gateway.",
+    "source": "Waypoint booking flow"
+  },
+  {
+    "id": "meals",
+    "topic": "onboard",
+    "keywords": ["meal", "food", "veg", "vegetarian", "jain", "special meal"],
+    "question": "Are meals included?",
+    "answer": "Full-service carriers include a meal; low-cost carriers (IndiGo, Akasa, SpiceJet, AirAsia) sell food onboard or let you pre-book it. Special meals (vegetarian, Jain, diabetic) must be requested at least 24 hours before departure, directly with the airline.",
+    "source": "Standard carrier practice"
+  },
+  {
+    "id": "what-is-waypoint",
+    "topic": "about",
+    "keywords": ["who are you", "what is this", "what can you do", "help", "waypoint"],
+    "question": "What can you do?",
+    "answer": "I find and compare flights, explain which option is actually the best value and why, collect passenger details, and email you an itinerary with a payment link. If something is outside what I can answer, I hand you to a human rather than guess.",
+    "source": "Waypoint product scope"
+  }
+]
