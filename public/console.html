@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Waypoint — agent console</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f4f5f7; --panel:#ffffff; --ink:#1b1b1b; --muted:#6c757d; --line:#e3e5e8;
+    --brand:#0f5132; --accent:#198754; --warn:#b45309; --danger:#b42318; --chip:#eef1f4;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#121415; --panel:#1b1e1f; --ink:#f1f1f1; --muted:#9aa0a6; --line:#2c3031; --chip:#25292b; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:12px 18px;background:var(--brand);color:#fff}
+  header h1{font-size:15px;margin:0;font-weight:700;letter-spacing:.3px}
+  header .dot{width:8px;height:8px;border-radius:50%;background:#f59e0b}
+  header .dot.live{background:#4ade80}
+  header .spacer{flex:1}
+  header small{opacity:.8}
+  main{display:grid;grid-template-columns:300px 1fr 280px;gap:14px;padding:14px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);
+            margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}
+  .queue{max-height:calc(100vh - 140px);overflow-y:auto}
+  .ticket{padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+  .ticket:hover{background:var(--chip)}
+  .ticket.active{background:var(--chip);box-shadow:inset 3px 0 0 var(--accent)}
+  .ticket .top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .ticket .ref{font-weight:700}
+  .wait{font-size:11px;font-weight:700;color:var(--accent)}
+  .wait.warn{color:var(--warn)} .wait.late{color:var(--danger)}
+  .chip{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.5px;
+        background:var(--chip);color:var(--muted);padding:3px 7px;border-radius:20px;margin-top:6px}
+  .ticket .who{font-size:12px;color:var(--muted);margin-top:4px}
+  .brief{padding:14px;border-bottom:1px solid var(--line);font-size:13px}
+  .brief b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-top:10px}
+  .brief b:first-child{margin-top:0}
+  .transcript{padding:14px;max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+  .msg{max-width:78%;padding:8px 11px;border-radius:12px;white-space:pre-wrap;word-break:break-word;font-size:13px}
+  .msg.user{align-self:flex-start;background:var(--chip)}
+  .msg.bot{align-self:flex-end;background:#d1e7dd;color:#0f5132}
+  .msg.agent{align-self:flex-end;background:#cfe2ff;color:#084298}
+  .msg .who{font-size:10px;opacity:.7;display:block;margin-bottom:2px;font-weight:700}
+  .composer{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line)}
+  .composer input{flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+                  background:transparent;color:inherit;font:inherit}
+  button{border:0;border-radius:8px;padding:10px 14px;font:inherit;font-weight:600;cursor:pointer;
+         background:var(--accent);color:#fff}
+  button.ghost{background:var(--chip);color:var(--ink)}
+  button:disabled{opacity:.5;cursor:default}
+  .actions{display:flex;gap:8px;padding:0 14px 14px}
+  .metric{display:flex;justify-content:space-between;padding:9px 14px;border-bottom:1px solid var(--line);font-size:13px}
+  .metric span{color:var(--muted)}
+  .metric b{font-variant-numeric:tabular-nums}
+  .gap{padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px}
+  .gap .n{font-weight:700;color:var(--accent)}
+  .gap .u{color:var(--muted);display:block;margin-top:2px}
+  .empty{padding:24px 14px;color:var(--muted);text-align:center;font-size:13px}
+  @media (max-width:980px){ main{grid-template-columns:1fr} .queue{max-height:240px} }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="dot"></div>
+  <h1>Waypoint — agent console</h1>
+  <div class="spacer"></div>
+  <small id="hint">connecting…</small>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Queue</h2>
+    <div class="queue" id="queue"><div class="empty">No open tickets.</div></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="title">Select a ticket</h2>
+    <div class="brief" id="brief"><div class="empty">Pick a ticket on the left to see the handoff brief.</div></div>
+    <div class="transcript" id="transcript"></div>
+    <div class="composer">
+      <input id="reply" placeholder="Reply as agent…" disabled>
+      <button id="send" disabled>Send</button>
+    </div>
+    <div class="actions">
+      <button class="ghost" id="take" disabled>Take over</button>
+      <button class="ghost" id="return" disabled>Return to bot</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Metrics</h2>
+    <div id="metrics"><div class="empty">Loading…</div></div>
+    <h2>Knowledge gaps</h2>
+    <div id="gaps"><div class="empty">None yet.</div></div>
+  </section>
+</main>
+
+<script>
+const token = new URLSearchParams(location.search).get('token') || '';
+const api = (p, opts) => fetch(`/api${p}${p.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`, opts);
+let active = null;
+let tickets = [];
+
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+async function loadQueue() {
+  const res = await api('/escalations');
+  if (!res.ok) { el('hint').textContent = 'bad token'; return; }
+  tickets = await res.json();
+  const q = el('queue');
+  if (!tickets.length) { q.innerHTML = '<div class="empty">No open tickets. 🎉</div>'; return; }
+  q.innerHTML = tickets.map(t => {
+    const cls = t.waitedMinutes > 20 ? 'late' : t.waitedMinutes > 10 ? 'warn' : '';
+    return `<div class="ticket ${t.ticket === active ? 'active' : ''}" data-t="${t.ticket}">
+      <div class="top"><span class="ref">${esc(t.ticket)}</span>
+        <span class="wait ${cls}">${t.waitedMinutes}m</span></div>
+      <div class="who">${esc(t.user)} · ${esc(t.state || '')}</div>
+      <span class="chip">${esc(t.reason)}</span>${t.status === 'CLAIMED' ? ' <span class="chip">claimed</span>' : ''}
+    </div>`;
+  }).join('');
+  q.querySelectorAll('.ticket').forEach(n => n.onclick = () => open(n.dataset.t));
+}
+
+async function open(ticket) {
+  active = ticket;
+  await loadQueue();
+  const res = await api(`/escalations/${ticket}/transcript`);
+  if (!res.ok) return;
+  const { escalation, messages } = await res.json();
+  const b = escalation.brief || {};
+  el('title').textContent = `${escalation.ticket} · ${escalation.reason}`;
+  el('brief').innerHTML =
+    `<b>Situation</b>${esc(b.situation)}
+     <b>Blocker</b>${esc(b.blocker)}
+     <b>Bot tried</b>${(b.botTried || []).map(esc).join(' · ') || '—'}
+     <b>Suggested first reply</b>${esc(b.suggestedReply)}`;
+  renderMessages(messages);
+  for (const id of ['reply','send','take','return']) el(id).disabled = false;
+  el('reply').value = b.suggestedReply || '';
+  el('reply').focus();
+}
+
+function renderMessages(messages) {
+  const t = el('transcript');
+  t.innerHTML = messages.map(m => {
+    const who = m.author === 'USER' ? 'user' : m.author === 'AGENT' ? 'agent' : 'bot';
+    return `<div class="msg ${who}"><span class="who">${esc(m.author)}</span>${esc(m.body)}</div>`;
+  }).join('');
+  t.scrollTop = t.scrollHeight;
+}
+
+el('send').onclick = async () => {
+  const text = el('reply').value.trim();
+  if (!text || !active) return;
+  el('send').disabled = true;
+  await api(`/escalations/${active}/reply`, {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ text })
+  });
+  el('reply').value = '';
+  el('send').disabled = false;
+  open(active);
+};
+el('reply').addEventListener('keydown', e => { if (e.key === 'Enter') el('send').click(); });
+
+el('take').onclick = async () => { await api(`/escalations/${active}/take`, { method:'POST' }); loadQueue(); };
+el('return').onclick = async () => {
+  await api(`/escalations/${active}/return`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ resolution: 'handled in console' })
+  });
+  active = null; el('title').textContent = 'Select a ticket';
+  el('brief').innerHTML = '<div class="empty">Ticket returned to the bot.</div>';
+  el('transcript').innerHTML = '';
+  loadQueue();
+};
+
+async function loadMetrics() {
+  const res = await api('/metrics');
+  if (!res.ok) return;
+  const m = await res.json();
+  const pct = (v) => v === null ? '—' : `${Math.round(v * 100)}%`;
+  const secs = (v) => v === null ? '—' : `${Math.round(v)}s`;
+  el('metrics').innerHTML = !m.available
+    ? '<div class="empty">Metrics need Postgres.<br>Set DATABASE_URL.</div>'
+    : [
+        ['Sessions', m.sessions], ['Completed', m.completed], ['Escalated', m.escalated],
+        ['Containment', pct(m.containmentRate)], ['Median time to quote', secs(m.medianSecondsToFirstQuote)],
+        ['Median turns to search', m.medianTurnsToSearch ?? '—'],
+        ['Quotes', m.bookings.quoted], ['Paid', m.bookings.paid],
+      ].map(([k, v]) => `<div class="metric"><span>${k}</span><b>${esc(v)}</b></div>`).join('');
+  el('gaps').innerHTML = (m.topGaps || []).length
+    ? m.topGaps.map(g => `<div class="gap"><span class="n">${g.count}×</span> ${esc(g.reason)}
+        <span class="u">"${esc(g.utterance)}"</span></div>`).join('')
+    : '<div class="empty">None yet.</div>';
+}
+
+const stream = new EventSource(`/api/stream?token=${encodeURIComponent(token)}`);
+stream.addEventListener('hello', () => { el('dot').classList.add('live'); el('hint').textContent = 'live'; });
+stream.addEventListener('ticket', () => { loadQueue(); loadMetrics(); });
+stream.addEventListener('message', () => { if (active) open(active); });
+stream.onerror = () => { el('dot').classList.remove('live'); el('hint').textContent = 'reconnecting…'; };
+
+loadQueue(); loadMetrics();
+setInterval(loadQueue, 15000);
+setInterval(loadMetrics, 30000);
+</script>
+</body>
+</html>

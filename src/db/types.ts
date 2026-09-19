@@ -57,6 +57,18 @@ export interface SessionSlots {
   greeted?: boolean;
   /** Set once the disambiguation question for a city has been asked. */
   pendingDisambiguation?: { slot: 'origin' | 'destination'; options: string[] };
+  /** Offer ids behind options 1, 2 and 3, so "reply 2" always means what it showed. */
+  pickIds?: string[];
+  /** Filters applied to the cached offer set by the last refinement. */
+  activeFilters?: {
+    nonStopOnly?: boolean;
+    maxPrice?: number;
+    preference?: 'CHEAPEST' | 'FASTEST' | 'BEST_VALUE' | 'COMFORT';
+    departWindow?: { earliest?: string; latest?: string };
+    carrier?: string;
+  };
+  /** A past date the user gave, awaiting a yes/no correction. */
+  pendingDateFix?: { field: 'departDate' | 'returnDate'; suggested: string; original: string };
 }
 
 export interface SessionRecord {

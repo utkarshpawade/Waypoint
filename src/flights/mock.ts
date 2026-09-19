@@ -112,9 +112,15 @@ function buildItinerary(
     (h) => h !== origin && h !== destination && getAirport(h),
   );
 
+  // Airlines connect through their own hub. Routing Scoot via Istanbul is the
+  // kind of detail that makes mock data look like mock data.
+  const home = getAirline(carrierCode)?.country;
+  const homeHubs = home ? viaPool.filter((h) => getAirport(h)?.country === home) : [];
+
   const waypoints: string[] = [origin];
   for (let i = 0; i < stops; i++) {
-    const via = pick(r, viaPool.filter((h) => !waypoints.includes(h)));
+    const candidates = (i === 0 && homeHubs.length ? homeHubs : viaPool).filter((h) => !waypoints.includes(h));
+    const via = pick(r, candidates.length ? candidates : viaPool.filter((h) => !waypoints.includes(h)));
     if (!via) break;
     waypoints.push(via);
   }
@@ -139,12 +145,15 @@ function buildItinerary(
       // as a tight connection downstream.
       const lay = 55 + Math.floor(r() * (intl ? 305 : 125));
       layoverMin.push(lay);
-      cursor = DateTime.fromISO(seg.arriveISO).plus({ minutes: lay });
+      // setZone:true keeps the connecting airport's own offset — without it the
+      // next segment is stamped in the server's timezone and the itinerary
+      // reads as arriving before it departs.
+      cursor = DateTime.fromISO(seg.arriveISO, { setZone: true }).plus({ minutes: lay });
     }
   }
 
-  const first = DateTime.fromISO(segments[0].departISO);
-  const last = DateTime.fromISO(segments[segments.length - 1].arriveISO);
+  const first = DateTime.fromISO(segments[0].departISO, { setZone: true });
+  const last = DateTime.fromISO(segments[segments.length - 1].arriveISO, { setZone: true });
   return {
     segments,
     totalDurationMin: Math.round(last.diff(first, 'minutes').minutes),
