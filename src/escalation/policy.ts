@@ -37,7 +37,10 @@ export interface PolicyDecision {
 const POLICY_SENSITIVE_PATTERNS: [RegExp, string][] = [
   [/\b(refund|charge ?back|money back|reimburse)\b/i, 'refund request'],
   [/\b(medical|wheelchair|oxygen|stretcher|pregnan\w+|disab\w+|assistance)\b/i, 'medical or accessibility need'],
-  [/\b(unaccompanied minor|child (travelling|traveling|flying) alone|kid alone|umnr)\b/i, 'unaccompanied minor'],
+  [
+    /\b(unaccompanied minor|umnr)\b|\b(kid|child|son|daughter)\b[^.?!]{0,24}\b(fly|flies|flying|travel|travels|travelling|traveling|going)\s+(alone|by (him|her)self|on (his|her) own)\b/i,
+    'unaccompanied minor',
+  ],
   [/\b(visa|immigration|deport\w*|entry (requirement|permit)|eligib\w+ to (enter|travel))\b/i, 'visa or immigration eligibility'],
   [/\b(pet|animal|dog|cat) (travel|in cabin|cargo)\b/i, 'pet travel'],
   [/\b(corporate|gst invoice|group booking|bulk booking)\b/i, 'group or corporate booking'],

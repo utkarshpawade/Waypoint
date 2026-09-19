@@ -1,0 +1,56 @@
+# Render blueprint. Create the service from this, then paste the secrets into
+# the Environment tab — nothing secret belongs in the repo.
+services:
+  - type: web
+    name: waypoint
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: CHANNEL
+        value: whatsapp
+      - key: FLIGHT_PROVIDER
+        value: mock
+      - key: BUSINESS_TZ
+        value: Asia/Kolkata
+      - key: BUSINESS_HOURS
+        value: 09:00-22:00
+      - key: ESCALATION_SLA_MINUTES
+        value: "10"
+      - key: LOG_LEVEL
+        value: info
+      # --- set these in the dashboard, not here ---
+      - key: DATABASE_URL
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: OWNER_WHATSAPP
+        sync: false
+      - key: WA_PAIRING_NUMBER
+        sync: false
+      # Set to the Render URL after the first deploy, then redeploy:
+      # the payment links in itinerary emails are built from it.
+      - key: PUBLIC_BASE_URL
+        sync: false

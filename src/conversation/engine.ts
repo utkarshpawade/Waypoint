@@ -108,6 +108,12 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
 
   if (policy.escalate && policy.reason) {
     const result = await escalate({ session, reason: policy.reason, detail: policy.detail });
+    // If the knowledge base has a holding line for this topic, the user gets
+    // that first — "I won't guess on something that can stop you at the gate"
+    // is a better answer than silence plus a ticket number.
+    if (kbHit && isHandoffEntry(kbHit.entry) && policy.reason === 'POLICY_SENSITIVE') {
+      await reply(session, channel, kbHit.entry.answer, decision);
+    }
     if (result.userMessage) await reply(session, channel, result.userMessage, decision);
     return;
   }
@@ -748,22 +754,46 @@ async function answerFaq(
  * text is not, so any fare or flight number in it must appear in the session's
  * offer cache — otherwise the message is suppressed and the turn escalates.
  */
-export function verifyOutbound(text: string, offers: FlightOffer[] | null): { ok: boolean; offending?: string } {
-  const allowedAmounts = new Set<number>();
+export function verifyOutbound(
+  text: string,
+  offers: FlightOffer[] | null,
+  /** Amounts the user themselves supplied — a stated budget is their number, not ours. */
+  userAmounts: number[] = [],
+): { ok: boolean; offending?: string } {
+  const fares: number[] = [];
+  const allowedAmounts = new Set<number>(userAmounts);
   const allowedFlights = new Set<string>();
+
   for (const o of offers ?? []) {
-    allowedAmounts.add(o.price.total);
-    allowedAmounts.add(o.price.perAdult);
+    for (const value of [o.price.total, o.price.perAdult]) {
+      fares.push(value);
+      allowedAmounts.add(value);
+    }
     for (const s of [...o.outbound.segments, ...(o.inbound?.segments ?? [])]) {
       allowedFlights.add(s.flightNumber.replace(/\s|-/g, '').toUpperCase());
     }
   }
 
-  for (const m of text.matchAll(/₹\s?([\d,]+)/g)) {
+  // The "why this one" lines quote differences between two cached fares
+  // ("₹3,840 cheaper than the fastest"). Those are derived from tool results,
+  // so they are legitimate — but only the exact deltas, nothing else.
+  for (const a of fares) {
+    for (const b of fares) {
+      const delta = Math.abs(a - b);
+      if (delta) allowedAmounts.add(delta);
+    }
+  }
+
+  // Our own booking and ticket references are random base36, so one can contain
+  // a run that reads exactly like a flight number (WP-DD3268 → "DD3268").
+  // Remove them before scanning rather than trying to except them afterwards.
+  const scannable = text.replace(/\bWP-[A-Z0-9]{4,8}\b/g, ' ');
+
+  for (const m of scannable.matchAll(/₹\s?([\d,]+)/g)) {
     const value = Number(m[1].replace(/,/g, ''));
     if (!allowedAmounts.has(value)) return { ok: false, offending: m[0] };
   }
-  for (const m of text.matchAll(/\b([A-Z0-9]{2}[- ]?\d{2,4})\b/g)) {
+  for (const m of scannable.matchAll(/\b([A-Z0-9]{2}[- ]?\d{2,4})\b/g)) {
     const norm = m[1].replace(/\s|-/g, '').toUpperCase();
     if (/^\d/.test(norm)) continue; // not an airline code
     if (!allowedFlights.has(norm)) return { ok: false, offending: m[1] };
@@ -774,8 +804,14 @@ export function verifyOutbound(text: string, offers: FlightOffer[] | null): { ok
 async function reply(session: SessionRecord, channel: Channel, text: string, d: TurnDecision): Promise<void> {
   let body = text;
 
-  if (d.source !== 'rules' && d.reply === text) {
-    const check = verifyOutbound(text, session.offers);
+  // Belt and braces: every outbound message is checked, not just the ones the
+  // model wrote. Engine-authored text is built from tool results and passes by
+  // construction — if it ever stops passing, that is a bug worth catching.
+  if (/₹|\b[A-Z0-9]{2}-\d{2,4}\b/.test(text)) {
+    const userAmounts = [session.slots.trip.budgetMax, selectedOffer(session)?.price.total].filter(
+      (n): n is number => typeof n === 'number',
+    );
+    const check = verifyOutbound(text, session.offers, userAmounts);
     if (!check.ok) {
       log.error({ offending: check.offending }, 'hallucination_blocked');
       await getStore().insertEvent({

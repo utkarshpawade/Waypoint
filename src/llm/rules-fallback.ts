@@ -65,9 +65,10 @@ const MONTHS: Record<string, number> = {
 export function parseDate(text: string, now: DateTime = DateTime.now().setZone(zone())): string | null {
   const t = text.toLowerCase();
 
+  // Order matters here: "day after tomorrow" contains "tomorrow".
+  if (/\bday after tomorrow\b/.test(t)) return now.plus({ days: 2 }).toISODate();
   if (/\b(today|tonight)\b/.test(t)) return now.toISODate();
   if (/\b(tomorrow|tmrw|tmr)\b/.test(t)) return now.plus({ days: 1 }).toISODate();
-  if (/\bday after tomorrow\b/.test(t)) return now.plus({ days: 2 }).toISODate();
 
   const inDays = /\bin (\d{1,2}) days?\b/.exec(t);
   if (inDays) return now.plus({ days: Number(inDays[1]) }).toISODate();
@@ -238,8 +239,9 @@ export function extractTripSlots(text: string, now?: DateTime): Partial<TripSlot
   // Passengers. Guard against eating "2 stops" or a price.
   const adults = /\b(\d{1,2})\s*(?:adults?|pax|passengers?|people|persons?|travell?ers?|of us|seats?)\b/.exec(lower);
   if (adults) slots.adults = clamp(Number(adults[1]), 1, 9);
+  // "me and my wife" contains "me", so the pair check has to come first.
+  else if (/\b(me and my (wife|husband|partner|friend)|couple|two of us|both of us)\b/.test(lower)) slots.adults = 2;
   else if (/\b(just|only)?\s*(me|myself|solo|alone)\b/.test(lower)) slots.adults = 1;
-  else if (/\b(me and my (wife|husband|partner|friend)|couple|two of us)\b/.test(lower)) slots.adults = 2;
 
   const children = /\b(\d{1,2})\s*(?:child|children|kids?)\b/.exec(lower);
   if (children) slots.children = clamp(Number(children[1]), 0, 8);
@@ -445,6 +447,9 @@ const FAQ_RE =
 const OUT_OF_SCOPE_RE =
   /\b(hotel|cab|taxi|train|bus|submarine|car rental|restaurant|weather|movie|pizza|insurance|tour package|cruise)\b/i;
 
+/** Words that mean the message is still about flying, even if it names a hotel. */
+const FLIGHT_CONTEXT_RE = /\b(flight|flights|fly|flying|fare|fares|airline|airport|ticket|boarding)\b/i;
+
 export function interpretRules(
   text: string,
   ctx: { state: string; expectingPassenger?: boolean; hasOffers?: boolean },
@@ -482,6 +487,11 @@ export function interpretRules(
   } else if (/\b(start over|restart|new search|different trip|forget that)\b/i.test(trimmed)) {
     intent = 'RESTART';
     confidence = 0.9;
+  } else if (OUT_OF_SCOPE_RE.test(trimmed) && !FLIGHT_CONTEXT_RE.test(trimmed)) {
+    // "book me a hotel in dubai" names a city we recognise — that does not make
+    // it a flight request. Out-of-scope has to win over slot extraction.
+    intent = 'OUT_OF_SCOPE';
+    confidence = 0.85;
   } else if (filledTrip >= 1 && (route.origin || route.destination || trip.departDate)) {
     intent = 'PROVIDE_TRIP';
     confidence = filledTrip >= 3 ? 0.9 : filledTrip >= 2 ? 0.75 : 0.6;

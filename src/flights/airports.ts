@@ -11,6 +11,13 @@ export interface Airport {
   lon: number;
   tz: string;
   aliases: string[];
+  /**
+   * The airport a bare city name means when the city has several. Set only
+   * where one is the obvious default (Goa → GOI); left unset where the choice
+   * is genuinely the traveller's (London → LHR or LGW), which is what makes
+   * the disambiguation question worth asking.
+   */
+  primary?: boolean;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -56,7 +63,7 @@ export function resolvePlace(term: string): Airport[] {
   const key = normalise(term);
   if (!key) return [];
   const exact = index.get(key);
-  if (exact) return exact;
+  if (exact) return preferPrimary(exact);
 
   // Try the longest matching known term contained in the phrase, so
   // "flying from bangalore tomorrow" still resolves.
@@ -65,10 +72,17 @@ export function resolvePlace(term: string): Airport[] {
     for (let i = 0; i + len <= words.length; i++) {
       const phrase = words.slice(i, i + len).join(' ');
       const hit = index.get(phrase);
-      if (hit) return hit;
+      if (hit) return preferPrimary(hit);
     }
   }
   return [];
+}
+
+/** Collapse a multi-airport city to its default, when it has one. */
+function preferPrimary(matches: Airport[]): Airport[] {
+  if (matches.length < 2) return matches;
+  const primaries = matches.filter((a) => a.primary);
+  return primaries.length === 1 ? primaries : matches;
 }
 
 /** Every airport term mentioned in a free-text message, in order of appearance. */
@@ -86,7 +100,7 @@ export function findPlaces(text: string): { term: string; airports: Airport[]; a
         // Ignore 2-letter noise and words that are also common English.
         if (phrase.length < 3) continue;
         for (let k = 0; k < len; k++) used.add(i + k);
-        out.push({ term: phrase, airports: hit, at: i });
+        out.push({ term: phrase, airports: preferPrimary(hit), at: i });
       }
     }
   }

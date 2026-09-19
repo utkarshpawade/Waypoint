@@ -65,9 +65,10 @@ export function optionsMessage(picks: RankedPick[], slots: TripSlots): string {
   const pax = (slots.adults ?? 1) + (slots.children ?? 0);
   const header = `Here are the three that matter 👇`;
   const cards = picks.map((p, i) => optionCard(p, i + 1, pax)).join('\n\n');
-  const footer = `Reply *1*, *2* or *3* — or tell me what to change (e.g. "morning flights", "under ${formatINR(
-    Math.round((picks[0].offer.price.total * 0.85) / 1000) * 1000,
-  )}").`;
+  // The hint deliberately carries no rupee figure: every number the bot shows
+  // should be one it can point at a tool result for, and an invented example
+  // budget is not one.
+  const footer = `Reply *1*, *2* or *3* — or tell me what to change ("morning flights", "non-stop", "anything cheaper").`;
   return `${header}\n\n${cards}\n\n${footer}`;
 }
 
