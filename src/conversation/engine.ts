@@ -40,9 +40,17 @@ const GREETING = "Hi! I'm Waypoint ✈️ I'll find you the best fare in about a
  */
 export function isAllowedSender(channelUserId: string): boolean {
   if (!config.allowedSenders.length) return true;
+
   const digits = channelUserId.split(':')[0].split('@')[0].replace(/\D/g, '');
-  if (!digits) return true; // cli / memory channels have no number
-  return config.allowedSenders.some((allowed) => digits === allowed || digits.endsWith(allowed));
+  // Not a phone number at all — a CLI or test identifier like "e2e-user", whose
+  // stray digits must not be read as one. The guard only governs real numbers.
+  if (digits.length < 8) return true;
+
+  // Compare the last ten digits, so a country code on one side and not the
+  // other still matches. Ten is short enough to be forgiving and long enough
+  // that two different people cannot collide.
+  const tail = (n: string) => n.slice(-10);
+  return config.allowedSenders.some((allowed) => tail(allowed) === tail(digits));
 }
 
 /** One user turn, end to end. Every transition below is the FSM's, not the model's. */

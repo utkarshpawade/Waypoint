@@ -19,6 +19,7 @@ export default defineConfig({
       SMTP_USER: '',
       SMTP_PASS: '',
       OWNER_WHATSAPP: '',
+      ALLOWED_SENDERS: '',
       WA_CLOUD_TOKEN: '',
       WA_CLOUD_PHONE_NUMBER_ID: '',
       WA_CLOUD_VERIFY_TOKEN: 'waypoint-verify',

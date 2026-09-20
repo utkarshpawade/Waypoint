@@ -51,4 +51,19 @@ describe('allowed senders', () => {
     expect(allowed('cli-user')).toBe(true);
     expect(allowed('test-user')).toBe(true);
   });
+
+  it('does not read an incidental digit in a non-numeric id as a phone number', async () => {
+    // "e2e-user" strips to "2". Treating that as a number silenced the whole
+    // end-to-end suite, so the guard now requires something number-shaped.
+    const allowed = await loadWith('917838447570');
+    expect(allowed('e2e-user')).toBe(true);
+    expect(allowed('demo-m3k9x2')).toBe(true);
+    expect(allowed('user-1')).toBe(true);
+  });
+
+  it('does not let a short suffix match a different number', async () => {
+    const allowed = await loadWith('917838447570');
+    expect(allowed('919999447570@s.whatsapp.net')).toBe(false);
+    expect(allowed('7838447570@s.whatsapp.net')).toBe(true); // same number, no country code
+  });
 });
