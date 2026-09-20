@@ -35,6 +35,13 @@ export function healthRouter(): Router {
       channel: channel?.name ?? 'none',
       db,
       model: model.configured ? (model.circuitOpen ? 'circuit-open' : model.model) : 'rules-only',
+      email: config.hasSmtp ? 'configured' : 'not configured',
+      // Every payment link in every itinerary email is built from this, and
+      // forgetting to set it after the first deploy is the classic mistake.
+      // Surfacing it here makes a misconfigured deploy visible immediately
+      // instead of at the moment a user taps a link to localhost.
+      baseUrl: config.publicBaseUrl,
+      baseUrlLooksDeployed: !/localhost|127\.0\.0\.1/.test(config.publicBaseUrl),
       uptime: Math.round((Date.now() - startedAt) / 1000),
       env: config.CHANNEL,
       ts: new Date().toISOString(),
