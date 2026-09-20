@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { CloudApiChannel, extractMessages, splitForCloud } from '../src/channels/cloud-api.js';
 
 /** A realistic inbound text delivery. */
-function delivery(messages: unknown[], contacts: unknown[] = [{ wa_id: '917838447570', profile: { name: 'Rahul' } }]) {
+function delivery(messages: unknown[], contacts: unknown[] = [{ wa_id: '919876543210', profile: { name: 'Rahul' } }]) {
   return {
     object: 'whatsapp_business_account',
     entry: [
@@ -21,7 +21,7 @@ function delivery(messages: unknown[], contacts: unknown[] = [{ wa_id: '91783844
 }
 
 const TEXT_MESSAGE = {
-  from: '917838447570',
+  from: '919876543210',
   id: 'wamid.HBgMOTE3ODM4NDQ3NTcwFQIAEhgg',
   timestamp: '1789800000',
   type: 'text',
@@ -31,7 +31,7 @@ const TEXT_MESSAGE = {
 describe('webhook parsing', () => {
   it('extracts a text message with sender, id and profile name', () => {
     const [m] = extractMessages(delivery([TEXT_MESSAGE]));
-    expect(m.channelUserId).toBe('917838447570');
+    expect(m.channelUserId).toBe('919876543210');
     expect(m.text).toBe('bangalore to dubai next friday');
     expect(m.messageId).toBe('wamid.HBgMOTE3ODM4NDQ3NTcwFQIAEhgg');
     expect(m.name).toBe('Rahul');
@@ -57,10 +57,10 @@ describe('webhook parsing', () => {
   });
 
   it('surfaces a non-text message as empty rather than dropping it', () => {
-    const image = { from: '917838447570', id: 'wamid.img', timestamp: '1789800000', type: 'image', image: { id: 'x' } };
+    const image = { from: '919876543210', id: 'wamid.img', timestamp: '1789800000', type: 'image', image: { id: 'x' } };
     const [m] = extractMessages(delivery([image]));
     expect(m.text).toBe('');
-    expect(m.channelUserId).toBe('917838447570');
+    expect(m.channelUserId).toBe('919876543210');
   });
 
   it('handles several messages in one delivery', () => {
