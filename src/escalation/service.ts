@@ -9,6 +9,12 @@ import { buildBrief } from './brief.js';
 import { isWithinBusinessHours } from './policy.js';
 import { recordGap } from './gaps.js';
 import { pushConsoleEvent } from '../web/sse.js';
+import { sendMail } from '../email/service.js';
+import {
+  agentHandoffHtml,
+  agentHandoffSubject,
+  agentHandoffText,
+} from '../email/templates/agent-handoff.html.js';
 import type { EscalationReason, EscalationRecord, SessionRecord } from '../db/types.js';
 
 const log = logger.child({ mod: 'escalation' });
@@ -28,23 +34,57 @@ export async function generateTicket(): Promise<string> {
   return `WP-${Date.now().toString(36).slice(-4).toUpperCase()}`;
 }
 
+/** The email we already hold for this person, if any. */
+export function knownEmail(session: SessionRecord): string | null {
+  return (
+    session.slots.passengers.find((p) => p.email)?.email ??
+    session.slots.draftPassenger.email ??
+    null
+  );
+}
+
 /**
  * The honest handoff line the user sees. Three lines, one apology, no SLA we
  * cannot hit: outside business hours it states the actual next-available time
  * instead of promising ten minutes.
+ *
+ * When we have an email, the handoff is concrete — a named person has already
+ * written to them, and they can see where. When we don't, asking for one is
+ * the single most useful thing the bot can do next.
  */
-export function userHandoffMessage(ticket: string, reason: EscalationReason): string {
+export function userHandoffMessage(
+  ticket: string,
+  reason: EscalationReason,
+  opts: { emailedTo?: string | null; askForEmail?: boolean } = {},
+): string {
   const now = new Date();
   const open = isWithinBusinessHours(now, config.businessHours, config.BUSINESS_TZ);
   const lead =
     reason === 'USER_REQUESTED_HUMAN'
-      ? '👤 Of course — putting you through to a human specialist.'
+      ? '👤 Of course — putting you through to our customer care team.'
       : "⚠️ I've hit something I shouldn't guess at.";
+
+  if (opts.emailedTo) {
+    return (
+      `${lead}\n` +
+      `Ticket *${ticket}* — *${config.AGENT_NAME}* from our customer care team has picked this up ` +
+      `and just emailed you at ${opts.emailedTo}. You can reply straight to that email.\n` +
+      `I can carry on with your trip here in the meantime — want me to?`
+    );
+  }
+
+  if (opts.askForEmail) {
+    return (
+      `${lead}\n` +
+      `Ticket *${ticket}* — our customer care team will take this from here.\n` +
+      `What's the best email for *${config.AGENT_NAME}* to reach you on?`
+    );
+  }
 
   if (open) {
     return (
       `${lead}\n` +
-      `Ticket *${ticket}* — someone will reply right here within ~${config.ESCALATION_SLA_MINUTES} minutes.\n` +
+      `Ticket *${ticket}* — our customer care team will contact you within ~${config.ESCALATION_SLA_MINUTES} minutes.\n` +
       `Meanwhile I can keep noting your trip details so they don't ask twice — want me to?`
     );
   }
@@ -52,9 +92,50 @@ export function userHandoffMessage(ticket: string, reason: EscalationReason): st
   const nextOpen = nextOpeningTime();
   return (
     `${lead}\n` +
-    `Ticket *${ticket}*. We're outside our hours (${config.BUSINESS_HOURS} ${shortZone()}), so a specialist will reply by *${nextOpen}*.\n` +
+    `Ticket *${ticket}*. We're outside our hours (${config.BUSINESS_HOURS} ${shortZone()}), so our customer care team will contact you by *${nextOpen}*.\n` +
     `I've logged everything so nobody asks you twice. I can keep searching flights in the meantime — want me to?`
   );
+}
+
+/**
+ * Send the handoff email as the agent. Returns the address on success.
+ * Never claims to have sent one that failed — the caller's wording depends on it.
+ */
+export async function sendAgentHandoffEmail(opts: {
+  session: SessionRecord;
+  ticket: string;
+  reason: EscalationReason;
+  to: string;
+  userQuestion: string;
+}): Promise<string | null> {
+  const { session, ticket, reason, to, userQuestion } = opts;
+  const input = {
+    ticket,
+    reason,
+    userQuestion: userQuestion.slice(0, 300) || 'your message to our assistant',
+    trip: session.slots.trip,
+    name: session.displayName ?? session.slots.passengers[0]?.fullName ?? undefined,
+  };
+
+  const result = await sendMail({
+    to,
+    subject: agentHandoffSubject(ticket, session.slots.trip),
+    html: agentHandoffHtml(input),
+    text: agentHandoffText(input),
+  });
+
+  await getStore().insertEvent({
+    sessionId: session.id,
+    type: result.ok ? 'agent_handoff_emailed' : 'agent_handoff_email_failed',
+    payload: { ticket, error: result.ok ? null : (result.error ?? 'unknown') },
+  });
+
+  if (!result.ok) {
+    log.error({ ticket, err: result.error }, 'agent handoff email failed');
+    return null;
+  }
+  log.info({ ticket }, 'agent handoff email sent');
+  return to;
 }
 
 function shortZone(): string {
@@ -119,6 +200,8 @@ export async function escalate(opts: {
   reason: EscalationReason;
   detail?: string;
   botTried?: string[];
+  /** The user's own words that triggered this, quoted back in the email. */
+  userQuestion?: string;
 }): Promise<EscalateResult> {
   const store = getStore();
   const { session, reason, detail } = opts;
@@ -176,9 +259,33 @@ export async function escalate(opts: {
     log.warn('OWNER_WHATSAPP not set — escalation alert not delivered');
   }
 
+  // Reach the user as a named human, not just a ticket number. If we already
+  // hold an email, write to them now; if not, the handoff message asks for one
+  // and the engine sends it as soon as they answer.
+  const lastUserMessage = opts.userQuestion ?? [...history].reverse().find((m) => m.author === 'USER')?.body ?? '';
+  const email = knownEmail(session);
+  let emailedTo: string | null = null;
+
+  if (email) {
+    emailedTo = await sendAgentHandoffEmail({
+      session,
+      ticket,
+      reason,
+      to: email,
+      userQuestion: lastUserMessage,
+    });
+  } else {
+    session.slots.pendingHandoffEmail = { ticket, reason, userQuestion: lastUserMessage.slice(0, 300) };
+    await store.saveSession(session);
+  }
+
   pushConsoleEvent('ticket', { ticket, reason, status: 'OPEN' });
-  log.info({ ticket, reason, ownerNotified }, 'escalation opened');
-  return { escalation, userMessage: userHandoffMessage(ticket, reason), ownerNotified };
+  log.info({ ticket, reason, ownerNotified, emailed: Boolean(emailedTo) }, 'escalation opened');
+  return {
+    escalation,
+    userMessage: userHandoffMessage(ticket, reason, { emailedTo, askForEmail: !email }),
+    ownerNotified,
+  };
 }
 
 function defaultBotTried(session: SessionRecord): string[] {
@@ -205,6 +312,13 @@ export async function claimEscalation(ticket: string, agent: string): Promise<Es
   return { ...esc, status: 'CLAIMED', claimedBy: agent, claimedAt: new Date() };
 }
 
+/** The furthest-along state the bot can safely pick up from. */
+export function resumeStateFor(session: SessionRecord): SessionRecord['state'] {
+  if (session.offers?.length) return session.selectedOfferId ? 'COLLECTING_PASSENGER' : 'AWAITING_SELECTION';
+  if (session.slots.trip.origin && session.slots.trip.destination) return 'COLLECTING_TRIP';
+  return 'GREETING';
+}
+
 export async function resolveEscalation(
   ticket: string,
   resolution: string,
@@ -218,13 +332,7 @@ export async function resolveEscalation(
 
   // Hand back to the bot in a state it can actually continue from.
   session.control = 'BOT';
-  session.state = session.offers?.length
-    ? session.selectedOfferId
-      ? 'COLLECTING_PASSENGER'
-      : 'AWAITING_SELECTION'
-    : session.slots.trip.origin && session.slots.trip.destination
-      ? 'COLLECTING_TRIP'
-      : 'GREETING';
+  session.state = resumeStateFor(session);
   session.slots.escalationTicket = undefined;
   session.slots.lowConfidenceStreak = 0;
   await store.saveSession(session);

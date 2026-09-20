@@ -170,7 +170,7 @@ describe('escalation', () => {
     await say('hi');
     const handoff = await say('I want to talk to a human');
     expect(handoff).toMatch(/Ticket \*WP-[A-Z0-9]{4}\*/);
-    expect(handoff).toMatch(/specialist/);
+    expect(handoff).toMatch(/customer care/i);
 
     const tickets = await getStore().listEscalations('OPEN');
     expect(tickets).toHaveLength(1);
@@ -180,6 +180,59 @@ describe('escalation', () => {
     // The bot is muted: the next user message is relayed, not answered.
     const silent = await say('are you there?');
     expect(silent).toBe('');
+  });
+
+  it('asks for an email so a named agent can reach them, when it has none', async () => {
+    await say('hi');
+    const handoff = await say('I want to talk to a human');
+    expect(handoff).toMatch(/customer care/i);
+    expect(handoff).toMatch(/Utkarsh/);
+    expect(handoff).toMatch(/best email/i);
+
+    const session = await getStore().getSessionByChannelUser('memory', 'e2e-user');
+    expect(session!.slots.pendingHandoffEmail?.reason).toBe('USER_REQUESTED_HUMAN');
+  });
+
+  it('sends the agent email once an address is given, and resumes helping', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    await say('I want to talk to a human');
+    const confirmed = await say('sure, rahul@example.com');
+
+    // SMTP is unconfigured in tests, so the bot must NOT claim it sent one.
+    expect(confirmed).toMatch(/couldn't get an email through to rahul@example\.com/);
+    expect(confirmed).toMatch(/still open/);
+
+    const session = await getStore().getSessionByChannelUser('memory', 'e2e-user');
+    expect(session!.slots.pendingHandoffEmail).toBeUndefined();
+    expect(session!.control).toBe('BOT'); // it can keep helping while the ticket stays open
+    expect(session!.slots.draftPassenger.email).toBe('rahul@example.com');
+    expect(await getStore().listEscalations('OPEN')).toHaveLength(1);
+  });
+
+  it('does not nag when the user declines to give an email', async () => {
+    await say('hi');
+    await say('get me an agent');
+    const declined = await say('no thanks');
+    expect(declined).toMatch(/kept ticket/i);
+    const session = await getStore().getSessionByChannelUser('memory', 'e2e-user');
+    expect(session!.slots.pendingHandoffEmail).toBeUndefined();
+    expect(session!.control).toBe('BOT');
+  });
+
+  it('emails the agent handoff straight away when it already has the address', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    await say('1');
+    await say('Rahul Sharma');
+    await say('12/04/1992 male');
+    await say('rahul@example.com 9876543210');
+    // The address is on file now, so an escalation should not ask for it again.
+    const handoff = await say('actually can i get a refund on this');
+    expect(handoff).toMatch(/Ticket \*WP-/);
+    expect(handoff).not.toMatch(/best email/i);
+    const session = await getStore().getSessionByChannelUser('memory', 'e2e-user');
+    expect(session!.slots.pendingHandoffEmail).toBeUndefined();
   });
 
   it('refuses out-of-scope requests without hallucinating', async () => {
@@ -240,8 +293,9 @@ describe('agent control over WhatsApp', () => {
     const before = channel.sent.length;
     const sent = await handleOwnerCommand(`/reply ${ticket} Infants under 2 travel on a parent's lap.`);
     expect(sent.reply).toMatch(/Sent to/);
-    // The user sees an agent-attributed message, not a bot one.
-    expect(channel.transcriptSince(before)).toMatch(/👤 \*Priya \(Waypoint\)\*/);
+    // The user sees an agent-attributed message, not a bot one. The name comes
+    // from AGENT_NAME, so assert the shape rather than pinning one person.
+    expect(channel.transcriptSince(before)).toMatch(/👤 \*[\w ]+ \(Waypoint\)\*/);
     expect(channel.transcriptSince(before)).toMatch(/Infants under 2/);
 
     const back = await handleOwnerCommand(`/bot ${ticket}`);

@@ -16,7 +16,8 @@ const log = logger.child({ mod: 'owner-cmd' });
  * most product-minded thing in the repo.
  */
 
-export const AGENT_NAME = 'Priya (Waypoint)';
+/** Who the user sees replying. One name across WhatsApp, email and the console. */
+export const AGENT_NAME = `${config.AGENT_NAME} (Waypoint)`;
 
 export function isOwner(channelUserId: string): boolean {
   const owner = ownerJid();

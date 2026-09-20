@@ -320,6 +320,11 @@ function to24h(hour: number, meridiem?: string): string {
 }
 
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
+
+/** The first email address in a message, lowercased. */
+export function extractEmail(text: string): string | null {
+  return EMAIL_RE.exec(text)?.[0]?.toLowerCase() ?? null;
+}
 const PHONE_RE = /(?:\+?\d{1,3}[\s-]?)?[6-9]\d{9}\b/;
 const PASSPORT_RE = /\b([A-PR-WY][0-9]{7})\b/i;
 

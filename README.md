@@ -48,7 +48,7 @@ optional upgrades, and the code path is identical with or without them.
 ```bash
 npm install
 npx tsx scripts/demo-conversation.ts   # the whole flow, scripted, in your terminal
-npm test                               # 152 tests
+npm test                               # 164 tests
 npm run cli                            # talk to it yourself
 ```
 
@@ -224,6 +224,17 @@ the transport changed. `/bot` hands back, and the bot resumes in a state it can
 actually continue from. The same actions exist in the browser console at
 `/console?token=…`, which is the nicer surface when you're at a desk.
 
+**The user also gets an email, written as the agent.** A ticket number is not a
+handoff — being contacted by a named person is. So the moment an escalation
+fires, `Utkarsh from Waypoint` writes to them: it quotes their actual question
+back, shows the trip so far, says he's looking into it, and asks them to reply
+to the email. It never attempts to answer the question — guessing there would
+undo the exact honesty that triggered the handoff.
+
+If the bot doesn't have an address yet, it asks for one, sends the email as soon
+as it's given, and then carries on helping while the ticket stays open. If SMTP
+fails it says so plainly rather than claiming an email was sent.
+
 **If nobody answers:** after `ESCALATION_SLA_MINUTES` the bot goes back to the
 user itself — honest about the delay, giving the real next-available time, and
 offering to carry on with the parts it can safely do alone. It then resumes
@@ -350,7 +361,7 @@ this build.
 ## Testing
 
 ```bash
-npm test          # 152 tests, no network, no model, no database
+npm test          # 164 tests, no network, no model, no database
 npm run typecheck
 ```
 

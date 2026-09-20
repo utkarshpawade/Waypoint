@@ -50,6 +50,9 @@ const schema = z.object({
    */
   ALLOWED_SENDERS: z.string().default(''),
   ESCALATION_SLA_MINUTES: z.coerce.number().int().positive().default(10),
+  /** The human a handed-off user hears from. Used in the email and the chat. */
+  AGENT_NAME: z.string().default('Utkarsh'),
+  AGENT_TITLE: z.string().default('Customer Care, Waypoint Travel'),
   BUSINESS_HOURS: z
     .string()
     .regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/, 'BUSINESS_HOURS must look like 09:00-22:00')

@@ -69,6 +69,11 @@ export interface SessionSlots {
   };
   /** A past date the user gave, awaiting a yes/no correction. */
   pendingDateFix?: { field: 'departDate' | 'returnDate'; suggested: string; original: string };
+  /**
+   * An escalation that could not email the user because we had no address.
+   * Cleared as soon as they give one and the agent's email goes out.
+   */
+  pendingHandoffEmail?: { ticket: string; reason: EscalationReason; userQuestion: string };
 }
 
 export interface SessionRecord {

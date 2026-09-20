@@ -8,10 +8,11 @@ import { getFlightProvider } from '../flights/provider.js';
 import { applyFilters, formatINR, topThree } from '../flights/ranking.js';
 import type { FlightOffer, RankedPick, SearchQuery } from '../flights/types.js';
 import { evaluateEscalation, nextLowConfidenceStreak, HIGH_VALUE_THRESHOLD } from '../escalation/policy.js';
-import { escalate } from '../escalation/service.js';
+import { escalate, resumeStateFor, sendAgentHandoffEmail } from '../escalation/service.js';
 import { handleOwnerCommand, isOwner, looksLikeCommand } from '../escalation/owner-commands.js';
 import { createQuote, HOLD_MINUTES, paymentLinkFor } from '../booking/service.js';
 import { checkDraft, nextPassengerPrompt, passengerIndex, totalPassengers } from '../booking/passenger.js';
+import { extractEmail } from '../llm/rules-fallback.js';
 import { interpretTurn, type TurnDecision } from './interpret.js';
 import { isHandoffEntry, lookupKb } from './kb.js';
 import { loadOrCreateSession, resetTrip, saveSession, withTripDefaults } from './session.js';
@@ -85,6 +86,14 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
     return;
   }
 
+  // An escalation is waiting on an address so the agent can write to them.
+  // This runs before the muted-for-human check: it is the one thing the bot
+  // should still do while a handoff is pending.
+  if (session.slots.pendingHandoffEmail) {
+    const handled = await completePendingHandoff(session, channel, msg.text);
+    if (handled) return;
+  }
+
   // A human has the conversation: relay, stay silent.
   if (session.control === 'HUMAN') {
     await relayToAgent(session, msg.text);
@@ -135,7 +144,12 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
   );
 
   if (policy.escalate && policy.reason) {
-    const result = await escalate({ session, reason: policy.reason, detail: policy.detail });
+    const result = await escalate({
+      session,
+      reason: policy.reason,
+      detail: policy.detail,
+      userQuestion: msg.text,
+    });
     // If the knowledge base has a holding line for this topic, the user gets
     // that first — "I won't guess on something that can stop you at the gate"
     // is a better answer than silence plus a ticket number.
@@ -877,6 +891,68 @@ async function reply(session: SessionRecord, channel: Channel, text: string, d: 
     confidence: d.confidence,
     intent: d.intent,
   });
+}
+
+/**
+ * The user was asked for an email so the agent could write to them. If this
+ * message has one, send the handoff email and let the bot carry on with the
+ * parts of the trip it can still do. The ticket stays open for the human.
+ *
+ * Returns true when the turn is finished here.
+ */
+async function completePendingHandoff(
+  session: SessionRecord,
+  channel: Channel,
+  text: string,
+): Promise<boolean> {
+  const pending = session.slots.pendingHandoffEmail!;
+  const email = extractEmail(text);
+
+  if (!email) {
+    // Don't nag. One reminder, then the SLA sweeper takes over.
+    if (/\b(no|skip|later|don'?t|nevermind|never mind)\b/i.test(text)) {
+      session.slots.pendingHandoffEmail = undefined;
+      session.control = 'BOT';
+      session.state = resumeStateFor(session);
+      await saveSession(session);
+      await channel.send(
+        session.channelUserId,
+        `No problem — I've kept ticket *${pending.ticket}* open and our team has the details.\n` +
+          `Shall we carry on with your trip?`,
+      );
+      return true;
+    }
+    return false; // not an email and not a refusal — fall through to normal handling
+  }
+
+  // Remember it, so the booking flow doesn't ask for the same address again.
+  session.slots.draftPassenger.email ??= email;
+
+  const sent = await sendAgentHandoffEmail({
+    session,
+    ticket: pending.ticket,
+    reason: pending.reason,
+    to: email,
+    userQuestion: pending.userQuestion,
+  });
+
+  session.slots.pendingHandoffEmail = undefined;
+  session.control = 'BOT';
+  session.state = resumeStateFor(session);
+  await saveSession(session);
+
+  await channel.send(
+    session.channelUserId,
+    sent
+      ? `✅ Done — *${config.AGENT_NAME}* from our customer care team has just emailed you at ${email} ` +
+          `about ticket *${pending.ticket}*. Reply straight to that email and it reaches them.\n\n` +
+          `I can carry on helping with your trip here in the meantime — want me to?`
+      : // Never claim an email was sent when it wasn't.
+        `I couldn't get an email through to ${email} just now — ticket *${pending.ticket}* is still open ` +
+          `and our team has your details, so they'll reach you.\n\n` +
+          `I can carry on helping with your trip here in the meantime — want me to?`,
+  );
+  return true;
 }
 
 async function relayToAgent(session: SessionRecord, text: string): Promise<void> {
