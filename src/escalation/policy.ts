@@ -8,6 +8,8 @@ import type { Intent } from '../llm/rules-fallback.js';
  */
 
 export const LOW_CONFIDENCE_THRESHOLD = 0.55;
+/** Consecutive unreadable turns before a human is fetched. */
+export const LOW_CONFIDENCE_STRIKES = 3;
 export const HIGH_VALUE_THRESHOLD = 150_000;
 export const MAX_GROUP_SIZE = 9;
 
@@ -106,12 +108,14 @@ export function evaluateEscalation(input: PolicyInput): PolicyDecision {
     };
   }
 
-  // Two consecutive turns we could not read. One is a misunderstanding; two is a pattern.
-  if (input.confidence < LOW_CONFIDENCE_THRESHOLD && input.lowConfidenceStreak >= 1) {
+  // Three consecutive turns we could not read. The first two get a specific
+  // clarifying question from the engine — a person rephrasing is not a reason
+  // to hand them to a human, and "I need to reach before noon" once was.
+  if (input.confidence < LOW_CONFIDENCE_THRESHOLD && input.lowConfidenceStreak >= LOW_CONFIDENCE_STRIKES - 1) {
     return {
       escalate: true,
       reason: 'LOW_CONFIDENCE_REPEATED',
-      detail: `two consecutive turns below ${LOW_CONFIDENCE_THRESHOLD} confidence`,
+      detail: `${LOW_CONFIDENCE_STRIKES} consecutive turns below ${LOW_CONFIDENCE_THRESHOLD} confidence`,
     };
   }
 

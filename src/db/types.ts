@@ -1,4 +1,4 @@
-import type { CabinClass, FlightOffer, Preference, TripType } from '../flights/types.js';
+import type { CabinClass, FlightOffer, PickLabel, Preference, TripType } from '../flights/types.js';
 
 export type ConversationState =
   | 'GREETING'
@@ -28,7 +28,15 @@ export interface TripSlots {
   preference?: Preference;
   budgetMax?: number;
   nonStopOnly?: boolean;
-  departWindow?: { earliest?: string; latest?: string };
+  /** Local time at the origin airport, HH:mm. */
+  departWindow?: TimeWindow;
+  /** Local time at the destination airport, HH:mm — "reaching before noon". */
+  arriveWindow?: TimeWindow;
+}
+
+export interface TimeWindow {
+  earliest?: string;
+  latest?: string;
 }
 
 export interface PassengerDraft {
@@ -59,12 +67,15 @@ export interface SessionSlots {
   pendingDisambiguation?: { slot: 'origin' | 'destination'; options: string[] };
   /** Offer ids behind options 1, 2 and 3, so "reply 2" always means what it showed. */
   pickIds?: string[];
+  /** The label each of those options was shown with, in the same order. */
+  pickLabels?: PickLabel[];
   /** Filters applied to the cached offer set by the last refinement. */
   activeFilters?: {
     nonStopOnly?: boolean;
     maxPrice?: number;
     preference?: 'CHEAPEST' | 'FASTEST' | 'BEST_VALUE' | 'COMFORT';
-    departWindow?: { earliest?: string; latest?: string };
+    departWindow?: TimeWindow;
+    arriveWindow?: TimeWindow;
     carrier?: string;
   };
   /** A past date the user gave, awaiting a yes/no correction. */
@@ -74,6 +85,11 @@ export interface SessionSlots {
    * Cleared as soon as they give one and the agent's email goes out.
    */
   pendingHandoffEmail?: { ticket: string; reason: EscalationReason; userQuestion: string };
+  /**
+   * The bot just asked "shall I carry on with your trip?" (after a handoff or
+   * an SLA lapse). A yes means "show me where we were", not "which one?".
+   */
+  offeredToResume?: boolean;
 }
 
 export interface SessionRecord {

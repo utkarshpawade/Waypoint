@@ -48,7 +48,7 @@ optional upgrades, and the code path is identical with or without them.
 ```bash
 npm install
 npx tsx scripts/demo-conversation.ts   # the whole flow, scripted, in your terminal
-npm test                               # 164 tests
+npm test                               # 200 tests
 npm run cli                            # talk to it yourself
 ```
 
@@ -178,10 +178,21 @@ absolute scale is route-dependent). Departure comfort, layover quality and
 carrier score are **absolute** 0–1 scores, so a 3am departure is still penalised
 even when every candidate is a red-eye. Lowest total score wins.
 
-The user sees exactly three labelled picks — 💰 Cheapest, ⚡ Fastest, ⭐ Best
-value — deduped, so if one flight would win two labels the second label takes the
-runner-up and you always get three real choices. The 💰 and ⚡ labels are always
-literally the cheapest and the shortest; only ⭐ is a judgement.
+The user sees up to three labelled picks — 💰 Cheapest, ⚡ Fastest, ⭐ Best
+value — and never the same flight twice. Every label is literally true: ⚡ only
+appears if something is meaningfully quicker than the cheapest (otherwise the
+cheapest card says *Cheapest & quickest*), and ⭐ is withheld from any option a
+card already shown beats on both price and time. With one or two matches the
+user sees one or two cards, not a padded three.
+
+Filters work on the cached result, instantly: stops, price, **departure time**
+("morning", "leave after 6pm") and **arrival time** ("reaching before noon",
+"be in Goa by 10:30am"). Times are read on the airport's own clock, never the
+server's. When nothing meets every constraint, the bot says exactly which one
+gave way — *"No non-stop flight is landing by 12:00 that day (the nearest
+non-stop lands at 14:43). These have a stop but are landing by 12:00"* — and
+when it's a time that can't be met,
+the cards are ordered by how close each gets to it.
 
 Each pick carries a **`whyThisOne`** line built by diffing it against the other
 two and surfacing the largest real deltas — an advantage and its catch:
@@ -251,7 +262,7 @@ The eight triggers, all pure and tested:
 | `OUT_OF_SCOPE` | Outside flights and booking, and not in the KB |
 | `KNOWLEDGE_GAP` | Adjacent question with no KB match |
 | `NEGATIVE_SENTIMENT` | Frustration markers, or 2+ corrections in 3 turns |
-| `LOW_CONFIDENCE_REPEATED` | Two consecutive turns under 0.55 confidence |
+| `LOW_CONFIDENCE_REPEATED` | Three consecutive turns under 0.55 confidence — the first two get a specific clarifying question |
 
 The handoff brief is one LLM call **with a template fallback** — escalation must
 never depend on the model working, since a broken model is one of the reasons to
@@ -329,11 +340,22 @@ engineering decisions:
   `max_tokens`, so a 58-token answer can cost 700 — set too low, the JSON comes
   back truncated.
 
-### 7. The provider can't break the demo
+### 7. Live fares, and a provider that can't break the demo
 
-`FLIGHT_PROVIDER=mock` is the default. The Amadeus adapter is wrapped in a
-decorator that falls back to the mock on any error or 5s timeout, so a
-third-party outage can't ruin a live test.
+`FLIGHT_PROVIDER=skyscanner` searches **live Skyscanner fares** through the
+*Sky Scrapper* API on RapidAPI
+([`skyscanner.ts`](src/flights/skyscanner.ts)): it resolves each airport to
+Skyscanner's entity id once, searches, and keeps polling while Skyscanner
+reports the result as incomplete — the cheapest fares are often the last to
+arrive. Results are cached for 15 minutes, because the free RapidAPI tier is a
+few hundred calls a month. Baggage is not in Skyscanner's response, so the
+allowance shown is the carrier's usual one.
+
+Every live provider (Skyscanner, Amadeus) is wrapped in a decorator that falls
+back to the mock on any error or timeout, so a third-party outage can't ruin a
+live test — and when that happens the options say *"these are sample fares, not
+bookable prices"* rather than passing them off as real. `FLIGHT_PROVIDER=mock`
+remains the default and needs no key.
 
 The mock is **seeded by `hash(origin + destination + date + cabin)`** — the same
 query always returns the same flights, which makes demos reproducible and tests
@@ -361,7 +383,7 @@ this build.
 ## Testing
 
 ```bash
-npm test          # 164 tests, no network, no model, no database
+npm test          # 200 tests, no network, no model, no database — on a UTC clock, like Render
 npm run typecheck
 ```
 
@@ -372,13 +394,31 @@ npm run typecheck
 | `rules-fallback.test.ts` | Date arithmetic against a frozen clock, route extraction, budget shorthand ("30k", "1.5 lakh"), intent classification |
 | `passenger-validation.test.ts` | Field-level validation, international-only passport rules, DOB and expiry sanity |
 | `formatter.test.ts` | Card shape and length, local-time rendering, next-day arrivals, passport masking, message splitting |
-| `conversation.e2e.test.ts` | The whole flow through the real engine: search → refine → select → passengers → quote, plus escalation, disambiguation, idempotent replays, session isolation and the anti-hallucination guard |
+| `conversation.e2e.test.ts` | The whole flow through the real engine: search → refine → select → passengers → quote, plus escalation, disambiguation, idempotent replays, session isolation, the anti-hallucination guard — and a replay of the WhatsApp conversation that exposed the bugs below |
+| `interpret.test.ts` | How the model's reading merges with the rules: confidence, time windows, what the rules never cede |
+| `skyscanner.test.ts` | Mapping Skyscanner itineraries, polling an incomplete search, caching, and failing loudly so the fallback takes over |
 
 Three of these suites found real bugs while being written — `day after tomorrow`
 resolving to tomorrow, "me and my wife" counting as one passenger, and connecting
 segments losing their timezone so an itinerary rendered as arriving before it
 departed. That last one only showed up because the test rendered a real
 multi-segment card.
+
+A real WhatsApp conversation found more, and each is now a test:
+
+- **"Tomorrow morning" showed afternoon flights — in production only.** Times
+  were read in the server's zone; Render is UTC, every dev machine was IST. The
+  suite now runs on a UTC clock.
+- **"Reaching before noon" was ignored.** There was no concept of an arrival
+  time, only a departure one.
+- **One flight appeared as two of the three cards** when fewer than three matched.
+- **A clear request was escalated to a human.** The model's confidence was
+  capped at the regexes' level, so every sentence the regexes missed counted as
+  unreadable, and two in a row fetched a person.
+- **"Hi" and "yes, carry on" got "reply 1, 2 or 3".** The bot now remembers it
+  offered to resume, and greets a returning user with where the search stands.
+- **Two quick messages could erase each other.** Turns for one conversation now
+  run one at a time.
 
 ---
 
@@ -397,16 +437,25 @@ Everything below is free and needs no card.
    ```bash
    curl -H "Authorization: Bearer $LLM_API_KEY" "$LLM_BASE_URL/models"
    ```
-3. **Gmail** → 2-Step Verification → App Password → `SMTP_*`. Run
-   `npm run email:test -- you@example.com` **now**, not later. If Gmail blocks or
-   spam-folders it, swap in a Brevo relay — same code path.
-4. **Render** → New Web Service from this repo (or use [`render.yaml`](render.yaml)).
+   **Check `/health` after deploying:** `modelError: "401 Invalid API Key"` means
+   every reply is coming from the regexes alone. The key is also checked at boot
+   and a rejection is logged loudly.
+3. **Email.** Render's free tier blocks outbound SMTP (ports 25/465/587), so on
+   Render use **Brevo's HTTPS API**: brevo.com → SMTP & API → API keys →
+   `BREVO_API_KEY`, and verify the `MAIL_FROM` address as a sender. Gmail SMTP
+   (2-Step Verification → App Password → `SMTP_*`) still works locally or on a
+   paid host. Either way, run `npm run email:test -- you@example.com` **now**,
+   not later.
+4. **Live fares (optional).** rapidapi.com → subscribe to *Sky Scrapper* →
+   `RAPIDAPI_KEY`, and set `FLIGHT_PROVIDER=skyscanner`. Without it the bot uses
+   the deterministic mock.
+5. **Render** → New Web Service from this repo (or use [`render.yaml`](render.yaml)).
    Build `npm ci`, start `npm start`, health check `/health`, free instance.
    Paste the env vars in.
-5. After the first deploy, set `PUBLIC_BASE_URL` to the Render URL and
+6. After the first deploy, set `PUBLIC_BASE_URL` to the Render URL and
    **redeploy** — the payment links in itinerary emails are built from it.
-6. `GET /admin/pair?token=…&phone=91XXXXXXXXXX`, then link the bot's phone.
-7. **cron-job.org** → ping `https://<app>.onrender.com/health` every 10 minutes,
+7. `GET /admin/pair?token=…&phone=91XXXXXXXXXX`, then link the bot's phone.
+8. **cron-job.org** → ping `https://<app>.onrender.com/health` every 10 minutes,
    so Render never sleeps. It doubles as uptime monitoring: the response says
    whether WhatsApp is actually connected.
 
@@ -430,9 +479,11 @@ Stated plainly, because they matter more than the feature list:
   here — payment confirmation, SLA nudge, escalation alert — is a reply inside an
   active conversation, so it holds for a demo. At real scale those become
   pre-approved template messages.
-- **Fares are simulated.** The mock is deterministic and plausible, not real. The
-  Amadeus adapter exists and works, but its test tier covers limited routes and
-  serves stale prices, so it isn't the default.
+- **Fares are simulated by default.** The mock is deterministic and plausible,
+  not real. Live Skyscanner fares need a RapidAPI key (`FLIGHT_PROVIDER=skyscanner`);
+  that adapter is built against the API's documented response shape and tested
+  against stubs, and is always wrapped in the mock fallback. The Amadeus test
+  tier covers limited routes and serves stale prices.
 - **No real payments.** `/pay/:ref` is a demo page. Nothing is ticketed, ever,
   and every user-facing string says so.
 - **Console auth is a shared token.** Fine for one operator and a demo; real auth

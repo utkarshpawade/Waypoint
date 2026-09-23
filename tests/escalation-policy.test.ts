@@ -103,11 +103,13 @@ describe('escalation triggers', () => {
     expect(evaluateEscalation(input({ recentCorrections: 1 })).escalate).toBe(false);
   });
 
-  it('needs two consecutive low-confidence turns, not one', () => {
+  it('needs three consecutive low-confidence turns — two just get a clarifying question', () => {
     const first = evaluateEscalation(input({ confidence: 0.3, lowConfidenceStreak: 0, text: 'mmm' }));
     expect(first.escalate).toBe(false);
     const second = evaluateEscalation(input({ confidence: 0.3, lowConfidenceStreak: 1, text: 'mmm' }));
-    expect(second.reason).toBe('LOW_CONFIDENCE_REPEATED');
+    expect(second.escalate).toBe(false);
+    const third = evaluateEscalation(input({ confidence: 0.3, lowConfidenceStreak: 2, text: 'mmm' }));
+    expect(third.reason).toBe('LOW_CONFIDENCE_REPEATED');
   });
 
   it('never stacks a second ticket on a conversation that already has one', () => {

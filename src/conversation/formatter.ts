@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 import { getAirport } from '../flights/airports.js';
 import { formatDuration, formatINR, totalDuration } from '../flights/ranking.js';
-import type { FlightOffer, Itin, RankedPick } from '../flights/types.js';
+import type { FlightOffer, Itin, PickLabel, RankedPick } from '../flights/types.js';
 import type { PassengerRecord, TripSlots } from '../db/types.js';
 
 /**
@@ -10,11 +10,22 @@ import type { PassengerRecord, TripSlots } from '../db/types.js';
  * unreliable on an unofficial client, so selection is "reply 1, 2 or 3".
  */
 
-const LABELS = {
+const LABELS: Record<PickLabel, { emoji: string; text: string }> = {
   CHEAPEST: { emoji: '💰', text: 'Cheapest' },
   FASTEST: { emoji: '⚡', text: 'Fastest' },
   BEST_VALUE: { emoji: '⭐', text: 'Best value' },
-} as const;
+  ALTERNATIVE: { emoji: '✈️', text: 'Also good' },
+  ONLY: { emoji: '✅', text: 'Your match' },
+  CLOSEST: { emoji: '🕒', text: 'Closest to your time' },
+};
+
+function labelText(pick: RankedPick): string {
+  const label = LABELS[pick.label];
+  // When the cheapest flight is also the quickest there is no separate ⚡ card,
+  // so the one card says both.
+  const text = pick.label === 'CHEAPEST' && pick.alsoFastest ? 'Cheapest & quickest' : label.text;
+  return `${label.emoji} *${text}*`;
+}
 
 export function hhmm(iso: string): string {
   return iso.slice(11, 16);
@@ -27,7 +38,9 @@ export function dayLabel(iso: string, tz = 'Asia/Kolkata'): string {
 export function stopsLabel(itin: Itin): string {
   if (itin.stops === 0) return 'non-stop';
   const via = itin.segments.slice(0, -1).map((s) => s.to).join(', ');
-  return itin.stops === 1 ? `1 stop · ${via}` : `${itin.stops} stops · ${via}`;
+  const count = itin.stops === 1 ? '1 stop' : `${itin.stops} stops`;
+  // A live provider may report the stop count without the connecting airports.
+  return via ? `${count} · ${via}` : count;
 }
 
 /** "+1" when the flight lands the next day — the detail people miss. */
@@ -45,12 +58,11 @@ export function routeLine(itin: Itin): string {
 }
 
 export function optionCard(pick: RankedPick, index: number, paxCount: number): string {
-  const label = LABELS[pick.label];
   const o = pick.offer;
   const seg = o.outbound.segments[0];
   const forPax = paxCount > 1 ? ` for ${paxCount}` : '';
   const lines = [
-    `*${index}.* ${label.emoji} *${label.text}* — ${formatINR(o.price.total)}${forPax}`,
+    `*${index}.* ${labelText(pick)} — ${formatINR(o.price.total)}${forPax}`,
     `${seg.carrierName} ${seg.flightNumber} · ${routeLine(o.outbound)}`,
     `⏱ ${formatDuration(o.outbound.totalDurationMin)} · ${stopsLabel(o.outbound)} · 🧳 ${o.baggage.checkInKg}kg`,
   ];
@@ -61,15 +73,57 @@ export function optionCard(pick: RankedPick, index: number, paxCount: number): s
   return lines.join('\n');
 }
 
-export function optionsMessage(picks: RankedPick[], slots: TripSlots): string {
+export function optionsMessage(picks: RankedPick[], slots: TripSlots, context?: string): string {
   const pax = (slots.adults ?? 1) + (slots.children ?? 0);
-  const header = `Here are the three that matter 👇`;
+  const header =
+    picks.length >= 3
+      ? 'Here are the three that matter 👇'
+      : picks.length === 2
+        ? 'Only two flights fit — here they are 👇'
+        : 'Just one flight fits 👇';
   const cards = picks.map((p, i) => optionCard(p, i + 1, pax)).join('\n\n');
-  // The hint deliberately carries no rupee figure: every number the bot shows
-  // should be one it can point at a tool result for, and an invented example
-  // budget is not one.
-  const footer = `Reply *1*, *2* or *3* — or tell me what to change ("morning flights", "non-stop", "anything cheaper").`;
-  return `${header}\n\n${cards}\n\n${footer}`;
+  return [context ?? header, cards, replyHint(picks.length)].join('\n\n');
+}
+
+/** How to choose, for however many options are on screen. */
+export function pickPrompt(count: number): string {
+  return count >= 3 ? 'reply *1*, *2* or *3*' : count === 2 ? 'reply *1* or *2*' : 'reply *1*';
+}
+
+/** "1 of 15 flights fits" / "4 of 15 flights fit". */
+export function fitText(n: number, total: number): string {
+  return `${n} of ${total} flights ${n === 1 ? 'fits' : 'fit'}`;
+}
+
+/**
+ * The hint deliberately carries no rupee figure: every number the bot shows
+ * should be one it can point at a tool result for, and an invented example
+ * budget is not one.
+ */
+export function replyHint(count: number): string {
+  const pick = count === 1 ? 'Reply *1* to book it' : `R${pickPrompt(count).slice(1)}`;
+  return `${pick} — or tell me what to change ("land before 11am", "non-stop", "anything cheaper", "show all").`;
+}
+
+/** "non-stop · departing 05:00–12:00 · landing by 12:00" — what the results are filtered on. */
+export function describeFilters(f: {
+  nonStopOnly?: boolean;
+  maxPrice?: number;
+  departWindow?: { earliest?: string; latest?: string };
+  arriveWindow?: { earliest?: string; latest?: string };
+}): string {
+  const bits: string[] = [];
+  if (f.nonStopOnly) bits.push('non-stop');
+  if (f.departWindow) bits.push(`departing ${describeWindow(f.departWindow)}`);
+  if (f.arriveWindow) bits.push(`landing ${describeWindow(f.arriveWindow)}`);
+  if (f.maxPrice) bits.push(`under ${formatINR(f.maxPrice)}`);
+  return bits.join(' · ');
+}
+
+export function describeWindow(w: { earliest?: string; latest?: string }): string {
+  if (w.earliest && w.latest) return `${w.earliest}–${w.latest}`;
+  if (w.latest) return `by ${w.latest}`;
+  return `after ${w.earliest}`;
 }
 
 export function searchingMessage(slots: TripSlots): string {
@@ -79,7 +133,18 @@ export function searchingMessage(slots: TripSlots): string {
   const cabin = (slots.cabin ?? 'ECONOMY').toLowerCase().replace('_', ' ');
   const when = dayLabel(`${slots.departDate}T00:00:00`);
   const ret = slots.returnDate ? `, back ${dayLabel(`${slots.returnDate}T00:00:00`)}` : '';
-  return `Got it — *${o?.iata} → ${d?.iata}* (${o?.city} to ${d?.city}), ${when}${ret}, ${pax}, ${cabin}.\nSearching fares… ⏱`;
+  // Say back every constraint that was heard — "morning" silently dropped is
+  // exactly how a bot feels dumb.
+  const filters = describeFilters({
+    nonStopOnly: slots.nonStopOnly,
+    maxPrice: slots.budgetMax,
+    departWindow: slots.departWindow,
+    arriveWindow: slots.arriveWindow,
+  });
+  return (
+    `Got it — *${o?.iata} → ${d?.iata}* (${o?.city} to ${d?.city}), ${when}${ret}, ${pax}, ${cabin}` +
+    `${filters ? ` · ${filters}` : ''}.\nSearching fares… ⏱`
+  );
 }
 
 export function describePax(slots: TripSlots): string {

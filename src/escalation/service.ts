@@ -9,6 +9,7 @@ import { buildBrief } from './brief.js';
 import { isWithinBusinessHours } from './policy.js';
 import { recordGap } from './gaps.js';
 import { pushConsoleEvent } from '../web/sse.js';
+import { conversationKey, withConversationLock } from '../conversation/locks.js';
 import { sendMail } from '../email/service.js';
 import {
   agentHandoffHtml,
@@ -44,6 +45,20 @@ export function knownEmail(session: SessionRecord): string | null {
 }
 
 /**
+ * The first line says *why* a person is being fetched, in words that match
+ * what actually happened. "I've hit something I shouldn't guess at" is honest
+ * for a visa question and nonsense for a search the bot fumbled.
+ */
+const HANDOFF_LEAD: Partial<Record<EscalationReason, string>> = {
+  USER_REQUESTED_HUMAN: '👤 Of course — putting you through to our customer care team.',
+  PROVIDER_FAILURE: "⚠️ Something went wrong on my side, so I've flagged it to a person.",
+  LOW_CONFIDENCE_REPEATED: "🙏 I'm not getting this right, so I've asked a person to step in.",
+  NEGATIVE_SENTIMENT: "🙏 Sorry this has been frustrating — I've asked a person to step in.",
+  HIGH_VALUE: '💼 For a booking this size, a person double-checks it before anything is issued.',
+  KNOWLEDGE_GAP: "⚠️ That's one I shouldn't guess at.",
+};
+
+/**
  * The honest handoff line the user sees. Three lines, one apology, no SLA we
  * cannot hit: outside business hours it states the actual next-available time
  * instead of promising ten minutes.
@@ -59,10 +74,7 @@ export function userHandoffMessage(
 ): string {
   const now = new Date();
   const open = isWithinBusinessHours(now, config.businessHours, config.BUSINESS_TZ);
-  const lead =
-    reason === 'USER_REQUESTED_HUMAN'
-      ? '👤 Of course — putting you through to our customer care team.'
-      : "⚠️ I've hit something I shouldn't guess at.";
+  const lead = HANDOFF_LEAD[reason] ?? HANDOFF_LEAD.KNOWLEDGE_GAP;
 
   if (opts.emailedTo) {
     return (
@@ -274,10 +286,16 @@ export async function escalate(opts: {
       to: email,
       userQuestion: lastUserMessage,
     });
+    // Every message in this branch ends "…want me to carry on?", so the bot
+    // must stay audible — muting it here turned the user's "yes" into silence.
+    // The owner can still /take the conversation at any point.
+    session.control = 'BOT';
+    session.state = resumeStateFor(session);
+    session.slots.offeredToResume = true;
   } else {
     session.slots.pendingHandoffEmail = { ticket, reason, userQuestion: lastUserMessage.slice(0, 300) };
-    await store.saveSession(session);
   }
+  await store.saveSession(session);
 
   pushConsoleEvent('ticket', { ticket, reason, status: 'OPEN' });
   log.info({ ticket, reason, ownerNotified, emailed: Boolean(emailedTo) }, 'escalation opened');
@@ -334,7 +352,9 @@ export async function resolveEscalation(
   session.control = 'BOT';
   session.state = resumeStateFor(session);
   session.slots.escalationTicket = undefined;
+  session.slots.pendingHandoffEmail = undefined;
   session.slots.lowConfidenceStreak = 0;
+  session.slots.offeredToResume = true;
   await store.saveSession(session);
 
   await store.insertEvent({
@@ -360,42 +380,68 @@ export async function runSlaSweep(now = Date.now()): Promise<number> {
     if (esc.slaNotifiedAt) continue;
     if (now - esc.createdAt.getTime() < slaMs) continue;
 
-    const session = await store.getSession(esc.sessionId);
-    if (!session) continue;
+    const found = await store.getSession(esc.sessionId);
+    if (!found) continue;
 
-    const nextOpen = nextOpeningTime();
+    // Queue behind any turn in flight for this user, then work on a fresh copy:
+    // saving a session loaded before their turn would undo that turn.
+    const done = await withConversationLock(conversationKey(found.channel, found.channelUserId), async () => {
+      const session = await store.getSession(esc.sessionId);
+      if (!session) return false;
+      await notifySlaLapse(esc, session, now);
+      return true;
+    });
+    if (done) notified++;
+  }
+  return notified;
+}
+
+async function notifySlaLapse(esc: EscalationRecord, session: SessionRecord, now: number): Promise<void> {
+  const store = getStore();
+  // Only a user who is actually waiting in silence needs this. If the bot is
+  // already talking to them again (they gave an email, or the handoff said
+  // "I can carry on meanwhile"), a "still tied up" message out of nowhere is
+  // noise that interrupts the trip they are in the middle of.
+  const userWaiting = session.control === 'HUMAN';
+  if (userWaiting) {
     const canResume = Boolean(session.slots.trip.origin && session.slots.trip.destination);
+    const when = isWithinBusinessHours(new Date(now), config.businessHours, config.BUSINESS_TZ)
+      ? 'as soon as they are free'
+      : `by *${nextOpeningTime()}*`;
     const message =
       `Our specialist is still tied up — I don't want to leave you waiting without an update.\n` +
-      `Your ticket *${esc.ticket}* is logged and they'll reply here by *${nextOpen}*.\n` +
+      `Your ticket *${esc.ticket}* is logged and they'll reply here ${when}.\n` +
       (canResume
         ? `Meanwhile I can still search and compare flights for you — want me to keep going?`
         : `Meanwhile I can start finding flights if you tell me where from and where to.`);
-
     await sendTo(session.channelUserId, message);
-    await store.updateEscalation(esc.ticket, { slaNotifiedAt: new Date(now) });
-    await store.insertEvent({
-      sessionId: session.id,
-      type: 'escalation_sla_breached',
-      payload: { ticket: esc.ticket, waitedMinutes: Math.round((now - esc.createdAt.getTime()) / 60000) },
-    });
-
-    // The bot can keep doing safe work while the ticket stays open.
-    session.control = 'BOT';
-    session.state = session.offers?.length ? 'AWAITING_SELECTION' : 'COLLECTING_TRIP';
-    await store.saveSession(session);
-
-    const owner = ownerJid();
-    if (owner) {
-      await sendTo(
-        owner,
-        `⏰ *${esc.ticket}* has been waiting ${config.ESCALATION_SLA_MINUTES}m with no reply. ` +
-          `I've told the user and resumed safe self-service. /take ${esc.ticket} when you can.`,
-      );
-    }
-    notified++;
   }
-  return notified;
+  await store.updateEscalation(esc.ticket, { slaNotifiedAt: new Date(now) });
+  await store.insertEvent({
+    sessionId: session.id,
+    type: 'escalation_sla_breached',
+    payload: { ticket: esc.ticket, waitedMinutes: Math.round((now - esc.createdAt.getTime()) / 60000) },
+  });
+
+  // The bot can keep doing safe work while the ticket stays open. A session
+  // the bot already resumed keeps whatever state it has moved on to since.
+  if (userWaiting) {
+    session.control = 'BOT';
+    session.state = resumeStateFor(session);
+    session.slots.pendingHandoffEmail = undefined;
+    session.slots.offeredToResume = true;
+    await store.saveSession(session);
+  }
+
+  const owner = ownerJid();
+  if (owner) {
+    await sendTo(
+      owner,
+      `⏰ *${esc.ticket}* has been waiting ${config.ESCALATION_SLA_MINUTES}m with no reply. ` +
+        (userWaiting ? `I've told the user and resumed safe self-service. ` : `The bot is still helping them meanwhile. `) +
+        `/take ${esc.ticket} when you can.`,
+    );
+  }
 }
 
 let sweepTimer: NodeJS.Timeout | null = null;

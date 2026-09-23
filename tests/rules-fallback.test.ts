@@ -4,6 +4,7 @@ import {
   extractBudget,
   extractDepartWindow,
   extractPassengerFields,
+  extractTimeWindows,
   extractRoute,
   extractSelection,
   extractTripSlots,
@@ -134,7 +135,41 @@ describe('budget and time windows', () => {
     expect(extractDepartWindow('morning flights')).toEqual({ earliest: '05:00', latest: '12:00' });
     expect(extractDepartWindow('something in the evening')).toEqual({ earliest: '17:00', latest: '21:00' });
     expect(extractDepartWindow('after 6pm')).toEqual({ earliest: '18:00' });
-    expect(extractDepartWindow('before noon')).toBeUndefined();
+    // With no arrival word, a bare time bound is about departure.
+    expect(extractDepartWindow('before noon')).toEqual({ latest: '12:00' });
+  });
+
+  it('tells arrival constraints from departure ones', () => {
+    // Every phrasing from the WhatsApp conversation that exposed this.
+    expect(extractTimeWindows('for tomorrow morning')).toEqual({ depart: { earliest: '05:00', latest: '12:00' } });
+    expect(extractTimeWindows('give me only non stop flights and reaching before noon')).toEqual({
+      arrive: { latest: '12:00' },
+    });
+    expect(extractTimeWindows('i need a flight reaching before noon')).toEqual({ arrive: { latest: '12:00' } });
+    expect(extractTimeWindows('i need to reach before noon')).toEqual({ arrive: { latest: '12:00' } });
+    expect(extractTimeWindows('i need a direct flight reaching goa before noon')).toEqual({
+      arrive: { latest: '12:00' },
+    });
+
+    expect(extractTimeWindows('be in goa by 10:30am')).toEqual({ arrive: { latest: '10:30' } });
+    expect(extractTimeWindows('leave after 6pm, land by 11')).toEqual({
+      depart: { earliest: '18:00' },
+      arrive: { latest: '23:00' },
+    });
+    expect(extractTimeWindows('arrive between 9am and 1pm')).toEqual({ arrive: { earliest: '09:00', latest: '13:00' } });
+    expect(extractTimeWindows('between 6 and 10am')).toEqual({ depart: { earliest: '06:00', latest: '10:00' } });
+    expect(extractTimeWindows('reaching goa in the morning')).toEqual({ arrive: { earliest: '05:00', latest: '12:00' } });
+    expect(extractTimeWindows('morning flight that lands before 11am')).toEqual({
+      depart: { earliest: '05:00', latest: '12:00' },
+      arrive: { latest: '11:00' },
+    });
+  });
+
+  it('does not read counts, dates or prices as clock times', () => {
+    expect(extractTimeWindows('by 2 adults')).toEqual({});
+    expect(extractTimeWindows('on the 25th')).toEqual({});
+    expect(extractTimeWindows('before 5 stops')).toEqual({});
+    expect(extractTimeWindows('under 20k before 9pm')).toEqual({ depart: { latest: '21:00' } });
   });
 });
 
@@ -224,6 +259,27 @@ describe('intent classification without an LLM', () => {
     expect(r.trip.departWindow).toEqual({ earliest: '05:00', latest: '12:00' });
   });
 
+  it('reads an arrival deadline on its own as a refinement, not as noise', () => {
+    const offers = { state: 'AWAITING_SELECTION', hasOffers: true };
+    const r = interpretRules('I need to reach before noon', offers, NOW);
+    expect(r.intent).toBe('REFINE');
+    expect(r.confidence).toBeGreaterThanOrEqual(0.55); // never counts towards a low-confidence handoff
+    expect(r.trip.arriveWindow).toEqual({ latest: '12:00' });
+
+    // Before any search, the same constraint is trip information to keep.
+    expect(interpretRules('non-stop, landing before noon', ctx, NOW).intent).toBe('PROVIDE_TRIP');
+  });
+
+  it('understands "show all" as clearing the filters', () => {
+    const r = interpretRules('show all flights', { state: 'AWAITING_SELECTION', hasOffers: true }, NOW);
+    expect(r.intent).toBe('REFINE');
+    expect(r.flags.clearFilters).toBe(true);
+  });
+
+  it('treats a question about a cabin as a question, not a search change', () => {
+    expect(interpretRules('what is the baggage on business class?', ctx, NOW).intent).toBe('FAQ');
+  });
+
   it('is more confident the more of the trip it recognised', () => {
     const vague = interpretRules('dubai', ctx, NOW);
     const complete = interpretRules('bangalore to dubai on 2 october, 2 adults, economy', ctx, NOW);
@@ -233,6 +289,8 @@ describe('intent classification without an LLM', () => {
   it('raises the frustration and correction flags', () => {
     expect(interpretRules('this is useless', ctx, NOW).flags.frustrated).toBe(true);
     expect(interpretRules('no, i said mumbai', ctx, NOW).flags.correction).toBe(true);
+    // Changing your own plan is not correcting the bot.
+    expect(interpretRules('actually make it chennai instead', ctx, NOW).flags.correction).toBe(false);
   });
 
   it('flags a past date instead of searching it', () => {

@@ -26,6 +26,7 @@ class LlmClient {
   private client: OpenAI | null = null;
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
+  private lastError: string | null = null;
 
   private get sdk(): OpenAI {
     if (!this.client) {
@@ -45,22 +46,42 @@ class LlmClient {
     return true;
   }
 
-  status(): { configured: boolean; model: string; circuitOpen: boolean; failures: number } {
+  status(): { configured: boolean; model: string; circuitOpen: boolean; failures: number; lastError: string | null } {
     return {
       configured: config.hasLlm,
       model: config.LLM_MODEL,
       circuitOpen: Date.now() < this.circuitOpenUntil,
       failures: this.consecutiveFailures,
+      lastError: this.lastError,
     };
+  }
+
+  /**
+   * One cheap call at boot to prove the key works. A rejected key otherwise
+   * fails quietly on every turn and the bot runs on regexes alone — which
+   * looks, from WhatsApp, exactly like a bot that is simply dumb.
+   */
+  async probe(): Promise<{ ok: boolean; error?: string }> {
+    if (!config.hasLlm) return { ok: false, error: 'LLM_API_KEY not set' };
+    try {
+      await this.sdk.models.list({ timeout: 8_000 });
+      this.noteSuccess();
+      return { ok: true };
+    } catch (err) {
+      this.noteFailure(err);
+      return { ok: false, error: (err as Error).message };
+    }
   }
 
   private noteSuccess() {
     this.consecutiveFailures = 0;
     this.circuitOpenUntil = 0;
+    this.lastError = null;
   }
 
   private noteFailure(err: unknown) {
     this.consecutiveFailures++;
+    this.lastError = (err as Error).message;
     if (this.consecutiveFailures >= 4) {
       // Stop hammering a dead or exhausted endpoint; try again in a minute.
       this.circuitOpenUntil = Date.now() + 60_000;
@@ -70,11 +91,22 @@ class LlmClient {
   }
 
   /** Free-text completion. Throws LlmUnavailableError after its retries. */
-  async chat(messages: ChatMessage[], opts: { maxTokens?: number; temperature?: number } = {}): Promise<string> {
+  async chat(
+    messages: ChatMessage[],
+    opts: { maxTokens?: number; temperature?: number; deadlineMs?: number } = {},
+  ): Promise<string> {
     if (!this.available()) throw new LlmUnavailableError('llm not configured or circuit open');
 
+    // An overall budget across every attempt, not per attempt: three 20s
+    // timeouts back to back is a minute of silence on WhatsApp.
+    const deadline = Date.now() + (opts.deadlineMs ?? 60_000);
     const attempts = 3;
     for (let i = 0; i < attempts; i++) {
+      const remaining = deadline - Date.now();
+      if (remaining < 1_000) {
+        this.noteFailure(new Error('deadline exceeded'));
+        throw new LlmUnavailableError('llm failed: deadline exceeded');
+      }
       try {
         const res = await this.sdk.chat.completions.create({
           model: config.LLM_MODEL,
@@ -84,28 +116,32 @@ class LlmClient {
           // thinking against this budget — a 58-token answer can cost 700.
           // Too low and the JSON comes back truncated.
           max_tokens: opts.maxTokens ?? 1200,
-        });
+        }, { timeout: Math.min(20_000, remaining) });
         const text = res.choices[0]?.message?.content ?? '';
         this.noteSuccess();
         return text;
       } catch (err) {
         const status = (err as { status?: number }).status;
         const retryable = status === 429 || (status ?? 500) >= 500 || status === undefined;
-        if (!retryable || i === attempts - 1) {
+        const backoff = 400 * 2 ** i + Math.random() * 200;
+        if (!retryable || i === attempts - 1 || Date.now() + backoff > deadline - 1_000) {
           this.noteFailure(err);
           throw new LlmUnavailableError(`llm failed: ${(err as Error).message}`);
         }
-        await sleep(400 * 2 ** i + Math.random() * 200);
+        await sleep(backoff);
       }
     }
     throw new LlmUnavailableError('unreachable');
   }
 
   /** Completion constrained to a JSON object. Returns null if it can't be parsed. */
-  async chatJson<T = Record<string, unknown>>(messages: ChatMessage[], maxTokens = 1500): Promise<T | null> {
+  async chatJson<T = Record<string, unknown>>(
+    messages: ChatMessage[],
+    opts: { maxTokens?: number; deadlineMs?: number } = {},
+  ): Promise<T | null> {
     const raw = await this.chat(
       [...messages, { role: 'system', content: 'Respond with a single JSON object and nothing else.' }],
-      { maxTokens, temperature: 0.1 },
+      { maxTokens: opts.maxTokens ?? 1500, temperature: 0.1, deadlineMs: opts.deadlineMs },
     );
     return parseJsonLoose<T>(raw);
   }

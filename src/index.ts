@@ -9,6 +9,7 @@ import { MemoryChannel } from './channels/memory.js';
 import { handleTurn } from './conversation/engine.js';
 import { startSlaSweeper, stopSlaSweeper } from './escalation/service.js';
 import { startServer } from './web/server.js';
+import { llm } from './llm/client.js';
 import type { Channel } from './channels/types.js';
 
 const log = logger.child({ mod: 'boot' });
@@ -43,6 +44,11 @@ async function main(): Promise<void> {
   await channel.start();
 
   startSlaSweeper();
+
+  void llm.probe().then((r) => {
+    if (r.ok) log.info({ model: config.LLM_MODEL }, 'llm key verified');
+    else if (config.hasLlm) log.error({ err: r.error }, 'LLM KEY REJECTED — the bot is running on rules only until this is fixed');
+  });
 
   const shutdown = async (signal: string) => {
     log.info({ signal }, 'shutting down');

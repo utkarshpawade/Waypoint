@@ -35,7 +35,10 @@ export function healthRouter(): Router {
       channel: channel?.name ?? 'none',
       db,
       model: model.configured ? (model.circuitOpen ? 'circuit-open' : model.model) : 'rules-only',
-      email: config.hasSmtp ? 'configured' : 'not configured',
+      // "401 Invalid API Key" here means every reply is coming from the regexes.
+      modelError: model.lastError,
+      email: config.hasBrevo ? 'brevo' : config.hasSmtp ? 'smtp' : 'not configured',
+      flights: config.FLIGHT_PROVIDER,
       // Every payment link in every itinerary email is built from this, and
       // forgetting to set it after the first deploy is the classic mistake.
       // Surfacing it here makes a misconfigured deploy visible immediately

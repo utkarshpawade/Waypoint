@@ -1,5 +1,13 @@
 import { defineConfig } from 'vitest/config';
 
+/**
+ * Run the suite on a UTC clock, like Render. Every local machine this was
+ * built on was in IST, which hid a bug where departure times were read in the
+ * server's zone: "morning flights" returned afternoon ones in production only.
+ * Set here so the test workers inherit it before any date code loads.
+ */
+process.env.TZ = 'UTC';
+
 export default defineConfig({
   test: {
     environment: 'node',
@@ -13,7 +21,11 @@ export default defineConfig({
      * the resilience story claims to survive.
      */
     env: {
+      TZ: 'UTC',
       LLM_API_KEY: '',
+      BREVO_API_KEY: '',
+      RAPIDAPI_KEY: '',
+      FLIGHT_PROVIDER: 'mock',
       DATABASE_URL: '',
       SMTP_HOST: '',
       SMTP_USER: '',

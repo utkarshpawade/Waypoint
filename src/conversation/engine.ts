@@ -5,7 +5,17 @@ import { logger, maskId } from '../logger.js';
 import type { Channel, InboundMessage } from '../channels/types.js';
 import { getAirport, isInternational } from '../flights/airports.js';
 import { getFlightProvider } from '../flights/provider.js';
-import { applyFilters, formatINR, topThree } from '../flights/ranking.js';
+import {
+  applyFilters,
+  arrivalMinutes,
+  clockTime,
+  departMinutes,
+  formatINR,
+  nearestPicks,
+  topThree,
+  windowMiss,
+  type RefineFilters,
+} from '../flights/ranking.js';
 import type { FlightOffer, RankedPick, SearchQuery } from '../flights/types.js';
 import { evaluateEscalation, nextLowConfidenceStreak, HIGH_VALUE_THRESHOLD } from '../escalation/policy.js';
 import { escalate, resumeStateFor, sendAgentHandoffEmail } from '../escalation/service.js';
@@ -13,23 +23,40 @@ import { handleOwnerCommand, isOwner, looksLikeCommand } from '../escalation/own
 import { createQuote, HOLD_MINUTES, paymentLinkFor } from '../booking/service.js';
 import { checkDraft, nextPassengerPrompt, passengerIndex, totalPassengers } from '../booking/passenger.js';
 import { extractEmail } from '../llm/rules-fallback.js';
-import { interpretTurn, type TurnDecision } from './interpret.js';
+import { interpretTurn, timeWindow, type TurnDecision } from './interpret.js';
 import { isHandoffEntry, lookupKb } from './kb.js';
 import { loadOrCreateSession, resetTrip, saveSession, withTripDefaults } from './session.js';
 import { isToolAllowed } from './states.js';
 import { validateToolArgs } from './tools.js';
 import {
+  describeFilters,
   describePax,
+  describeWindow,
+  fitText,
   itineraryCard,
   optionsMessage,
+  pickPrompt,
+  replyHint,
   searchingMessage,
   selectionMessage,
 } from './formatter.js';
+import { conversationKey, withConversationLock } from './locks.js';
 import type { SessionRecord, TripSlots } from '../db/types.js';
 
 const log = logger.child({ mod: 'engine' });
 
-const GREETING = "Hi! I'm Waypoint ✈️ I'll find you the best fare in about a minute.\nWhere from, and where to?";
+const INTRO = "Hi! I'm Waypoint ✈️ I'll find you the best fare in about a minute.";
+const GREETING = `${INTRO}\nWhere from, and where to?`;
+
+/** Per-turn plumbing the state handlers need beyond the session itself. */
+interface TurnCtx {
+  /** Send a message now, mid-turn — "Searching…" must land before a slow search, not after it. */
+  sendNow: (text: string) => Promise<void>;
+  /** The previous bot message asked "shall I carry on?". */
+  resumeOffered: boolean;
+  /** The user's message, verbatim. */
+  text: string;
+}
 
 /**
  * Is this sender one the bot should answer?
@@ -56,8 +83,6 @@ export function isAllowedSender(channelUserId: string): boolean {
 
 /** One user turn, end to end. Every transition below is the FSM's, not the model's. */
 export async function handleTurn(msg: InboundMessage, channel: Channel): Promise<void> {
-  const store = getStore();
-
   // The on-call human talks to the bot through the same socket as everyone else.
   if (isOwner(msg.channelUserId) && looksLikeCommand(msg.text)) {
     const result = await handleOwnerCommand(msg.text);
@@ -70,6 +95,21 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
     return;
   }
 
+  await withConversationLock(conversationKey(channel.name, msg.channelUserId), async () => {
+    try {
+      await runTurn(msg, channel);
+    } catch (err) {
+      // Whatever broke, the user is not left talking to a wall.
+      log.error({ err }, 'turn failed');
+      await channel
+        .send(msg.channelUserId, 'Sorry — something went wrong on my side. Could you send that again?')
+        .catch(() => {});
+    }
+  });
+}
+
+async function runTurn(msg: InboundMessage, channel: Channel): Promise<void> {
+  const store = getStore();
   const session = withTripDefaults(await loadOrCreateSession(channel.name, msg.channelUserId, msg.name));
 
   // Idempotency: reconnects replay messages, and answering twice is worse than
@@ -115,12 +155,23 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
       trip: {},
       passenger: {},
       ambiguousPlaces: [],
-      flags: { wantsHuman: false, frustrated: false, correction: false, pastDate: false, greeting: false },
+      flags: {
+        wantsHuman: false,
+        frustrated: false,
+        correction: false,
+        pastDate: false,
+        greeting: false,
+        clearFilters: false,
+      },
       source: 'rules',
     };
   }
 
-  if (decision.flags.correction) session.slots.corrections++;
+  // "Corrections in the last few turns", not ever: a clean turn lets one go,
+  // so changing your mind twice in a long conversation is not "frustration".
+  session.slots.corrections = decision.flags.correction
+    ? session.slots.corrections + 1
+    : Math.max(0, session.slots.corrections - 1);
 
   // ── escalation policy runs before any work is done ───────────────────────
   const open = await store.findOpenEscalationBySession(session.id);
@@ -169,16 +220,26 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
       const validated = validateToolArgs(decision.tool, decision.args);
       if (!validated.ok) {
         log.warn({ tool: decision.tool, error: validated.error }, 'tool args rejected');
+        // Drop the arguments with the tool. Acting on args that failed
+        // validation is how an invented preference once reached the ranker.
         decision.tool = undefined;
+        decision.args = undefined;
       } else {
         decision.args = validated.args as Record<string, unknown>;
       }
     }
   }
 
+  const ctx: TurnCtx = {
+    sendNow: (text) => reply(session, channel, text, decision),
+    resumeOffered: Boolean(session.slots.offeredToResume),
+    text: msg.text,
+  };
+  session.slots.offeredToResume = undefined;
+
   let messages: string[];
   try {
-    messages = await route(session, decision, msg.text, kbHit);
+    messages = await route(session, decision, msg.text, kbHit, ctx);
   } catch (err) {
     log.error({ err }, 'routing failed');
     const result = await escalate({
@@ -188,6 +249,10 @@ export async function handleTurn(msg: InboundMessage, channel: Channel): Promise
     });
     messages = result.userMessage ? [result.userMessage] : ['Something went wrong on my side — a human is on it.'];
   }
+
+  // Every turn gets an answer. A state with nothing to say is a bug, but the
+  // user should see a way forward rather than silence while it gets fixed.
+  if (!messages.length) messages = [clarify(session, decision)];
 
   for (const m of messages) await reply(session, channel, m, decision);
   await saveSession(session);
@@ -202,6 +267,7 @@ async function route(
   d: TurnDecision,
   text: string,
   kbHit: ReturnType<typeof lookupKb>,
+  ctx: TurnCtx,
 ): Promise<string[]> {
   // Global intents, legal from any state.
   if (d.intent === 'RESTART') {
@@ -225,15 +291,27 @@ async function route(
     if (resolved) return resolved;
   }
 
+  // The bot is back in charge but the state still says "handed off" — pick up
+  // from the furthest point it can safely continue, rather than saying nothing.
+  if ((session.state === 'ESCALATED' || session.state === 'HUMAN_CONTROL') && session.control === 'BOT') {
+    session.state = resumeStateFor(session);
+  }
+
+  // "Want me to carry on?" — "yes" means "show me where we were", not "which one?".
+  if (ctx.resumeOffered && d.intent === 'CONFIRM') return resumeWhereWeWere(session, ctx);
+  if (ctx.resumeOffered && d.intent === 'DENY') {
+    return ["No problem — I'll leave it there. Message me any time and we'll pick up where we left off."];
+  }
+
   switch (session.state) {
     case 'GREETING':
     case 'COLLECTING_TRIP':
-      return collectTrip(session, d);
+      return collectTrip(session, d, ctx);
 
     case 'SEARCHING':
     case 'PRESENTING_OPTIONS':
     case 'AWAITING_SELECTION':
-      return awaitingSelection(session, d);
+      return awaitingSelection(session, d, ctx);
 
     case 'COLLECTING_PASSENGER':
       return collectPassenger(session, d);
@@ -242,7 +320,7 @@ async function route(
       return confirming(session, d);
 
     case 'COMPLETED':
-      return completed(session, d);
+      return completed(session, d, ctx);
 
     default:
       // ESCALATED / HUMAN_CONTROL are handled before routing; ISSUING is transient.
@@ -252,28 +330,30 @@ async function route(
 
 // ── trip collection ──────────────────────────────────────────────────────────
 
-async function collectTrip(session: SessionRecord, d: TurnDecision): Promise<string[]> {
-  const prefix: string[] = [];
-  if (!session.slots.greeted) {
-    session.slots.greeted = true;
-    prefix.push(GREETING);
-  }
+async function collectTrip(session: SessionRecord, d: TurnDecision, ctx: TurnCtx): Promise<string[]> {
+  const firstTurn = !session.slots.greeted;
+  session.slots.greeted = true;
 
   const ambiguity = mergeTripInto(session, d);
-  if (ambiguity) return [...prefix.slice(0, 1), ambiguity];
+  const heardSomething = Boolean(Object.keys(d.trip).length || ambiguity);
+  // A first message that already says where ("flight from Delhi to Goa") gets
+  // a one-line hello and the *next* question — never "where from, and where to?".
+  const intro = firstTurn ? (heardSomething ? INTRO : GREETING) : null;
+  const withIntro = (m: string) => (intro ? `${intro}\n\n${m}` : m);
+
+  if (ambiguity) return [withIntro(ambiguity)];
 
   const pastDate = checkPastDate(session);
-  if (pastDate) return [...prefix.slice(0, 1), pastDate];
+  if (pastDate) return [withIntro(pastDate)];
 
   withTripDefaults(session);
   session.state = 'COLLECTING_TRIP';
 
   const missing = missingTripSlots(session.slots.trip);
-  if (!missing.length) return [...prefix, ...(await runSearch(session))];
+  if (!missing.length) return runSearch(session, ctx, intro ? INTRO : undefined);
 
-  // Ask at most two, and only if we haven't already asked the same thing twice.
-  const question = askFor(session, missing);
-  return prefix.length ? [prefix[0]] : [question];
+  if (intro && !heardSomething) return [intro];
+  return [withIntro(askFor(session, missing))];
 }
 
 function missingTripSlots(t: TripSlots): ('origin' | 'destination' | 'departDate')[] {
@@ -309,6 +389,13 @@ function knownSoFar(t: TripSlots): string | null {
   else if (t.destination) bits.push(`to *${getAirport(t.destination)?.city ?? t.destination}*`);
   if (t.departDate) bits.push(DateTime.fromISO(t.departDate).toFormat('ccc d LLL'));
   if ((t.adults ?? 1) > 1 || t.children || t.infants) bits.push(describePax(t));
+  const filters = describeFilters({
+    nonStopOnly: t.nonStopOnly,
+    maxPrice: t.budgetMax,
+    departWindow: t.departWindow,
+    arriveWindow: t.arriveWindow,
+  });
+  if (filters) bits.push(filters);
   return bits.length ? `Got it — ${bits.join(', ')}.` : null;
 }
 
@@ -404,15 +491,19 @@ function buildQuery(t: TripSlots): SearchQuery {
     nonStopOnly: t.nonStopOnly,
     maxPrice: t.budgetMax,
     departWindow: t.departWindow,
+    arriveWindow: t.arriveWindow,
   };
 }
 
-async function runSearch(session: SessionRecord): Promise<string[]> {
+async function runSearch(session: SessionRecord, ctx: TurnCtx, intro?: string): Promise<string[]> {
   const store = getStore();
   const t = session.slots.trip;
   const query = buildQuery(t);
 
   session.state = 'SEARCHING';
+  // Say what was heard *before* the wait: a live fare search takes seconds,
+  // and silence while it runs reads as the bot having died.
+  await ctx.sendNow(intro ? `${intro}\n\n${searchingMessage(t)}` : searchingMessage(t));
   const started = Date.now();
   const offers = await getFlightProvider().search(query);
 
@@ -446,49 +537,172 @@ async function runSearch(session: SessionRecord): Promise<string[]> {
     maxPrice: t.budgetMax,
     preference: t.preference,
     departWindow: t.departWindow,
+    arriveWindow: t.arriveWindow,
   };
 
-  return [searchingMessage(t), ...presentOptions(session)];
+  return presentOptions(session);
 }
 
-/** Rank the cached set under the active filters and render the three cards. */
-function presentOptions(session: SessionRecord, note?: string): string[] {
+/**
+ * Rank the cached set under the active filters and render the cards.
+ *
+ * When nothing meets every constraint, say exactly which one could not be met
+ * and show the flights *nearest* to it — "nothing lands by 12:00; the earliest
+ * is 13:05" is an answer, a silently ignored filter is not.
+ */
+function presentOptions(session: SessionRecord, opts: { applied?: string[]; lead?: string } = {}): string[] {
   const t = session.slots.trip;
   const filters = session.slots.activeFilters ?? {};
   const all = session.offers ?? [];
 
   let pool = applyFilters(all, filters);
-  let relaxed: string | null = null;
+  const active = describeFilters(filters);
+  let header: string | undefined;
+  let nearest: ReturnType<typeof relaxFilters>['nearest'];
 
-  if (!pool.length) {
-    // Never answer "nothing matches" when there is a near miss to show.
-    pool = applyFilters(all, { ...filters, maxPrice: undefined });
-    if (pool.length) {
-      const cheapest = Math.min(...pool.map((o) => o.price.total));
-      relaxed = `Nothing under ${formatINR(filters.maxPrice!)} on this route — the closest I have is ${formatINR(
-        cheapest,
-      )}.`;
-    } else {
-      pool = applyFilters(all, { preference: filters.preference });
-      relaxed = 'Nothing matched all of that, so here are the closest options.';
-    }
+  if (pool.length) {
+    const fit = fitText(pool.length, all.length);
+    if (opts.applied?.length) header = `Re-ranking for *${opts.applied.join(', ')}* — ${fit} 👇`;
+    else if (opts.lead) header = active ? `${opts.lead}\n_${active} — ${fit}._` : opts.lead;
+    else if (active) header = `*${active}* — ${fit}. Here are the best 👇`;
+  } else {
+    const relaxed = relaxFilters(all, filters);
+    pool = relaxed.pool;
+    nearest = relaxed.nearest;
+    header = opts.lead ? `${opts.lead}\n${relaxed.note}` : relaxed.note;
   }
   if (!pool.length) pool = all;
 
-  const picks = topThree(pool, t.preference ?? 'BEST_VALUE');
-  session.slots.pickIds = picks.map((p) => p.offer.id);
-  session.state = 'AWAITING_SELECTION';
+  // A live provider that fell back to the simulator must not pass sample
+  // fares off as real ones.
+  if (config.FLIGHT_PROVIDER !== 'mock' && all.length && all.every((o) => o.provider === 'mock')) {
+    header =
+      `${header ?? 'Here are the best options 👇'}\n` +
+      `_⚠️ Live fares are unavailable right now — these are sample fares, not bookable prices._`;
+  }
 
-  const out: string[] = [];
-  if (note) out.push(note);
-  if (relaxed) out.push(relaxed);
-  out.push(optionsMessage(picks, t));
-  return out;
+  const picks = nearest
+    ? nearestPicks(pool, nearest.which, nearest.window)
+    : topThree(pool, t.preference ?? 'BEST_VALUE');
+  session.slots.pickIds = picks.map((p) => p.offer.id);
+  session.slots.pickLabels = picks.map((p) => p.label);
+  session.state = 'AWAITING_SELECTION';
+  return [optionsMessage(picks, t, header)];
+}
+
+type Relaxable = 'nonStopOnly' | 'departWindow' | 'maxPrice' | 'arriveWindow';
+
+/**
+ * The order constraints give way in when nothing meets all of them. A landing
+ * deadline is usually a hard one (a meeting, a connection); a non-stop is a
+ * preference. So stops give way first and the arrival time last.
+ */
+const RELAX_ORDER: Relaxable[] = ['nonStopOnly', 'departWindow', 'maxPrice', 'arriveWindow'];
+
+function relaxFilters(
+  all: FlightOffer[],
+  filters: RefineFilters,
+): {
+  pool: FlightOffer[];
+  note: string;
+  /** Set when the constraint that gave way was a time: order the cards by it. */
+  nearest?: { which: 'depart' | 'arrive'; window: { earliest?: string; latest?: string } };
+} {
+  for (const k of RELAX_ORDER.filter((key) => Boolean(filters[key]))) {
+    const rest: RefineFilters = { ...filters, [k]: undefined };
+    const pool = applyFilters(all, rest);
+    if (pool.length) {
+      const closest = closestTo(pool, filters, k);
+      const nearest =
+        k === 'departWindow'
+          ? { which: 'depart' as const, window: filters.departWindow! }
+          : k === 'arriveWindow'
+            ? { which: 'arrive' as const, window: filters.arriveWindow! }
+            : undefined;
+      return { pool: closest, note: relaxNote(k, filters, rest, closest, all), nearest };
+    }
+  }
+  // Nothing survives dropping any single constraint: show what is nearest overall.
+  const miss = (o: FlightOffer) =>
+    (filters.departWindow ? windowMiss(departMinutes(o.outbound), filters.departWindow) : 0) +
+    (filters.arriveWindow ? windowMiss(arrivalMinutes(o.outbound), filters.arriveWindow) : 0) +
+    (filters.nonStopOnly ? o.outbound.stops * 60 : 0);
+  const pool = [...all].sort((a, b) => miss(a) - miss(b)).slice(0, 6);
+  return {
+    pool,
+    note: `Nothing is *${describeFilters(filters)}* on this date, so here are the closest I have 👇`,
+  };
+}
+
+/** For a time window that couldn't be met, the flights nearest to it — not a random three. */
+function closestTo(pool: FlightOffer[], filters: RefineFilters, dropped: Relaxable): FlightOffer[] {
+  const w = dropped === 'departWindow' ? filters.departWindow : dropped === 'arriveWindow' ? filters.arriveWindow : null;
+  if (!w) return pool;
+  const time = (o: FlightOffer) =>
+    dropped === 'departWindow' ? departMinutes(o.outbound) : arrivalMinutes(o.outbound);
+  const ranked = [...pool].sort((a, b) => windowMiss(time(a), w) - windowMiss(time(b), w));
+  const best = windowMiss(time(ranked[0]), w);
+  return ranked.filter((o, i) => i < 3 || windowMiss(time(o), w) <= best + 90).slice(0, 6);
+}
+
+function relaxNote(
+  dropped: Relaxable,
+  filters: RefineFilters,
+  rest: RefineFilters,
+  pool: FlightOffer[],
+  all: FlightOffer[],
+): string {
+  const restDesc = describeFilters(rest);
+  switch (dropped) {
+    case 'maxPrice': {
+      const cheapest = Math.min(...pool.map((o) => o.price.total));
+      return restDesc
+        ? `Nothing under ${formatINR(filters.maxPrice!)} is also *${restDesc}* — the closest fare is ${formatINR(cheapest)} 👇`
+        : `Nothing under ${formatINR(filters.maxPrice!)} on this route — the closest I have is ${formatINR(cheapest)}.`;
+    }
+    case 'nonStopOnly': {
+      const nonStops = all.filter((o) => o.outbound.stops === 0);
+      if (!nonStops.length) return 'There are no non-stop flights on this route that day — these have the fewest stops 👇';
+      if (!restDesc) return 'No non-stop fits — these have the fewest stops 👇';
+      return `No non-stop flight is *${restDesc}* that day${nonStopHint(nonStops, rest)}. These have a stop but are *${restDesc}* 👇`;
+    }
+    case 'departWindow':
+      return (
+        `Nothing departs ${describeWindow(filters.departWindow!)}${restDesc ? ` and is also *${restDesc}*` : ''} — ` +
+        `here are the nearest departure times 👇`
+      );
+    case 'arriveWindow': {
+      const soonest = pool[0] ? clockTime(arrivalMinutes(pool[0].outbound)) : null;
+      return (
+        `Nothing${restDesc ? ` *${restDesc}*` : ''} lands ${describeWindow(filters.arriveWindow!)} that day` +
+        `${soonest ? ` — the closest lands at ${soonest}` : ''}. Here are the nearest 👇`
+      );
+    }
+  }
+}
+
+/** The single most useful fact about the non-stops the user can't have. */
+function nonStopHint(nonStops: FlightOffer[], rest: RefineFilters): string {
+  if (rest.arriveWindow) {
+    const w = rest.arriveWindow;
+    const best = [...nonStops].sort(
+      (a, b) => windowMiss(arrivalMinutes(a.outbound), w) - windowMiss(arrivalMinutes(b.outbound), w),
+    )[0];
+    return ` (the nearest non-stop lands at ${clockTime(arrivalMinutes(best.outbound))})`;
+  }
+  if (rest.departWindow) {
+    const w = rest.departWindow;
+    const best = [...nonStops].sort(
+      (a, b) => windowMiss(departMinutes(a.outbound), w) - windowMiss(departMinutes(b.outbound), w),
+    )[0];
+    return ` (the nearest non-stop leaves at ${clockTime(departMinutes(best.outbound))})`;
+  }
+  return '';
 }
 
 // ── selection & refinement ───────────────────────────────────────────────────
 
-async function awaitingSelection(session: SessionRecord, d: TurnDecision): Promise<string[]> {
+async function awaitingSelection(session: SessionRecord, d: TurnDecision, ctx: TurnCtx): Promise<string[]> {
   // A new city or date means a new search, not a refinement.
   const routeChanged =
     (d.trip.origin && d.trip.origin !== session.slots.trip.origin) ||
@@ -500,7 +714,7 @@ async function awaitingSelection(session: SessionRecord, d: TurnDecision): Promi
     if (ambiguity) return [ambiguity];
     const past = checkPastDate(session);
     if (past) return [past];
-    if (!missingTripSlots(session.slots.trip).length) return runSearch(session);
+    if (!missingTripSlots(session.slots.trip).length) return runSearch(session, ctx);
     session.state = 'COLLECTING_TRIP';
     return [askFor(session, missingTripSlots(session.slots.trip))];
   }
@@ -513,30 +727,149 @@ async function awaitingSelection(session: SessionRecord, d: TurnDecision): Promi
   // Anything that narrows the set is a refinement against the cache — instant,
   // and it costs no provider or model quota.
   const refinement = collectRefinement(session, d);
-  if (refinement) {
-    return presentOptions(session, refinement);
+  if (refinement.applied.length) return presentOptions(session, { applied: refinement.applied });
+
+  const shown = session.slots.pickIds?.length ?? 3;
+  if (refinement.restated) {
+    // They asked for what is already applied — say so, rather than answering
+    // a clear request with a generic "reply 1, 2 or 3".
+    const active = describeFilters(session.slots.activeFilters ?? {});
+    return [
+      active
+        ? `✅ Already done — the options above are all *${active}*.\n${replyHint(shown)}`
+        : `You're already seeing every flight I found.\n${replyHint(shown)}`,
+    ];
   }
 
+  // An address typed while choosing is the one the itinerary should go to.
+  // Keep it, so the passenger step doesn't ask for it again.
+  const email = extractEmail(ctx.text);
+  if (email) {
+    session.slots.draftPassenger.email = email;
+    return [`📧 Noted — I'll send the itinerary to ${email}.\nNow pick your flight: ${pickPrompt(shown)}.`];
+  }
+
+  if (d.intent === 'GREET') return [welcomeBack(session)];
   if (d.intent === 'CONFIRM') {
-    return ['Which one — reply *1*, *2* or *3*?'];
+    // "yes" with a single option on screen can only mean that one.
+    if (shown === 1) return selectOption(session, 1);
+    return [`Which one — ${pickPrompt(shown)}?`];
   }
-
-  return ['Reply *1*, *2* or *3* to pick one — or tell me what to change (cheaper, non-stop, morning, a different date).'];
+  if (d.intent === 'DENY') {
+    return ['No problem. Tell me what to change — a time, date, price or stops — or say *start over* for a new trip.'];
+  }
+  return [clarify(session, d)];
 }
 
-function collectRefinement(session: SessionRecord, d: TurnDecision): string | null {
+/** "Hi" in the middle of a search: remind them where they are, in one breath. */
+function welcomeBack(session: SessionRecord): string {
+  const t = session.slots.trip;
+  const date = t.departDate ? ` on ${DateTime.fromISO(t.departDate).toFormat('ccc d LLL')}` : '';
+  const active = describeFilters(session.slots.activeFilters ?? {});
+  return (
+    `Hi again 👋 We were looking at *${t.origin} → ${t.destination}*${date}${active ? ` (${active})` : ''}.\n` +
+    `${replyHint(session.slots.pickIds?.length ?? 3)}\nOr say *start over* for a new trip.`
+  );
+}
+
+/**
+ * The answer to a message the engine could not act on. The model's own reply
+ * is used when there is one and it passes the fact check; otherwise the user
+ * gets concrete examples of what they *can* say here, not a shrug.
+ */
+function clarify(session: SessionRecord, d: TurnDecision): string {
+  const modelReply = usableModelReply(session, d);
+  if (modelReply) return modelReply;
+
+  switch (session.state) {
+    case 'AWAITING_SELECTION':
+      return (
+        `Sorry, I didn't quite get that 🤔 I can narrow these down by landing or departure time ` +
+        `("land before 11am", "leave after 6pm"), stops ("non-stop"), price ("under 8k") or date ` +
+        `("Friday instead") — or ${pickPrompt(session.slots.pickIds?.length ?? 3)} to book.`
+      );
+    case 'COLLECTING_PASSENGER':
+      return nextPassengerPrompt(session) ?? 'Could you send that again?';
+    case 'CONFIRMING':
+      return `Just say *yes* and I'll issue it, or *no* to change something.`;
+    case 'COMPLETED':
+      return 'Want me to look at another trip, or anything about baggage or check-in?';
+    default: {
+      const missing = missingTripSlots(session.slots.trip);
+      return missing.length ? askFor(session, missing) : 'Where are you flying from, and where to?';
+    }
+  }
+}
+
+function usableModelReply(session: SessionRecord, d: TurnDecision): string | null {
+  if (!d.reply || d.source === 'rules' || d.reply.length > 700) return null;
+  // Checked here rather than left to reply(): a model reply that quotes a fare
+  // it wasn't given should fall back to the plain answer, not open a ticket.
+  const amounts = [session.slots.trip.budgetMax].filter((n): n is number => typeof n === 'number');
+  if (!verifyOutbound(d.reply, session.offers, amounts).ok) {
+    log.warn('model reply failed the fact check — using the deterministic answer');
+    return null;
+  }
+  return d.reply;
+}
+
+/** After "shall I carry on?" → "yes": pick up exactly where the trip was. */
+async function resumeWhereWeWere(session: SessionRecord, ctx: TurnCtx): Promise<string[]> {
+  switch (session.state) {
+    case 'AWAITING_SELECTION':
+    case 'PRESENTING_OPTIONS':
+    case 'SEARCHING':
+      if (session.offers?.length) return presentOptions(session, { lead: "Great — here's where we left off 👇" });
+      break;
+    case 'COLLECTING_PASSENGER':
+      return [nextPassengerPrompt(session) ?? 'Now your details, please.'];
+    case 'COMPLETED':
+      return ['Great — where would you like to go next?'];
+  }
+  const missing = missingTripSlots(session.slots.trip);
+  if (!missing.length) return runSearch(session, ctx);
+  session.state = 'COLLECTING_TRIP';
+  return [askFor(session, missing)];
+}
+
+const PREFERENCES = ['CHEAPEST', 'FASTEST', 'BEST_VALUE', 'COMFORT'] as const;
+
+/**
+ * Apply whatever the message changes about the filters. `applied` lists the
+ * real changes; `restated` means the user asked for something already in
+ * force — both deserve a different answer from "didn't understand".
+ */
+function collectRefinement(session: SessionRecord, d: TurnDecision): { applied: string[]; restated: boolean } {
   const filters = { ...(session.slots.activeFilters ?? {}) };
   const t = session.slots.trip;
   const applied: string[] = [];
+  let mentioned = false;
 
   const args = (d.args ?? {}) as Record<string, unknown>;
+
+  if (d.flags.clearFilters || args.reset === true) {
+    mentioned = true;
+    if (describeFilters(filters)) applied.push('all flights, no filters');
+    filters.nonStopOnly = undefined;
+    filters.maxPrice = undefined;
+    filters.departWindow = undefined;
+    filters.arriveWindow = undefined;
+    filters.carrier = undefined;
+    t.nonStopOnly = undefined;
+    t.budgetMax = undefined;
+    t.departWindow = undefined;
+    t.arriveWindow = undefined;
+  }
+
+  const preference = d.trip.preference ?? args.preference;
   const src = {
     nonStopOnly: d.trip.nonStopOnly ?? (typeof args.nonStopOnly === 'boolean' ? args.nonStopOnly : undefined),
     maxPrice: d.trip.budgetMax ?? (typeof args.maxPrice === 'number' ? args.maxPrice : undefined),
-    preference: d.trip.preference ?? (typeof args.preference === 'string' ? args.preference : undefined),
-    departWindow: d.trip.departWindow ?? (args.departWindow as { earliest?: string; latest?: string } | undefined),
-    cabin: d.trip.cabin,
-    adults: d.trip.adults,
+    preference: PREFERENCES.includes(preference as (typeof PREFERENCES)[number])
+      ? (preference as (typeof PREFERENCES)[number])
+      : undefined,
+    departWindow: d.trip.departWindow ?? timeWindow(args.departWindow),
+    arriveWindow: d.trip.arriveWindow ?? timeWindow(args.arriveWindow),
   };
 
   // Only report what actually changed. The model likes to restate slots it was
@@ -544,28 +877,48 @@ function collectRefinement(session: SessionRecord, d: TurnDecision): string | nu
   // echoing those back reads like the bot misheard.
   // `undefined` and `false` both mean "no non-stop filter", so a model that
   // helpfully restates nonStopOnly:false is not a change worth announcing.
-  if (src.nonStopOnly !== undefined && Boolean(src.nonStopOnly) !== Boolean(filters.nonStopOnly)) {
-    filters.nonStopOnly = src.nonStopOnly;
-    t.nonStopOnly = src.nonStopOnly;
-    applied.push(src.nonStopOnly ? 'non-stop only' : 'stops allowed');
+  if (src.nonStopOnly !== undefined) {
+    mentioned ||= src.nonStopOnly;
+    if (Boolean(src.nonStopOnly) !== Boolean(filters.nonStopOnly)) {
+      filters.nonStopOnly = src.nonStopOnly;
+      t.nonStopOnly = src.nonStopOnly;
+      applied.push(src.nonStopOnly ? 'non-stop only' : 'stops allowed');
+    }
   }
-  if (src.maxPrice !== undefined && src.maxPrice !== filters.maxPrice) {
-    filters.maxPrice = src.maxPrice;
-    t.budgetMax = src.maxPrice;
-    applied.push(`under ${formatINR(src.maxPrice)}`);
+  if (src.maxPrice !== undefined) {
+    mentioned = true;
+    if (src.maxPrice !== filters.maxPrice) {
+      filters.maxPrice = src.maxPrice;
+      t.budgetMax = src.maxPrice;
+      applied.push(`under ${formatINR(src.maxPrice)}`);
+    }
   }
-  if (src.preference !== undefined && src.preference !== filters.preference) {
-    filters.preference = src.preference as typeof filters.preference;
-    t.preference = src.preference as typeof t.preference;
-    applied.push(src.preference === 'CHEAPEST' ? 'cheapest first' : src.preference.toLowerCase().replace('_', ' '));
+  if (src.preference !== undefined) {
+    mentioned = true;
+    if (src.preference !== filters.preference) {
+      filters.preference = src.preference;
+      t.preference = src.preference;
+      applied.push(src.preference === 'CHEAPEST' ? 'cheapest first' : src.preference.toLowerCase().replace('_', ' '));
+    }
   }
-  if (src.departWindow !== undefined && !sameWindow(src.departWindow, filters.departWindow)) {
-    filters.departWindow = src.departWindow;
-    t.departWindow = src.departWindow;
-    applied.push(`departing ${src.departWindow.earliest ?? '00:00'}–${src.departWindow.latest ?? '23:59'}`);
+  if (src.departWindow !== undefined) {
+    mentioned = true;
+    if (!sameWindow(src.departWindow, filters.departWindow)) {
+      filters.departWindow = src.departWindow;
+      t.departWindow = src.departWindow;
+      applied.push(`departing ${describeWindow(src.departWindow)}`);
+    }
+  }
+  if (src.arriveWindow !== undefined) {
+    mentioned = true;
+    if (!sameWindow(src.arriveWindow, filters.arriveWindow)) {
+      filters.arriveWindow = src.arriveWindow;
+      t.arriveWindow = src.arriveWindow;
+      applied.push(`landing ${describeWindow(src.arriveWindow)}`);
+    }
   }
 
-  if (!applied.length) return null;
+  if (!applied.length) return { applied, restated: mentioned };
 
   session.slots.activeFilters = filters;
   void getStore().insertEvent({
@@ -573,7 +926,7 @@ function collectRefinement(session: SessionRecord, d: TurnDecision): string | nu
     type: 'search_refined',
     payload: { filters: applied },
   });
-  return `Re-ranking for *${applied.join(', ')}* — no new search needed 👇`;
+  return { applied, restated: false };
 }
 
 function sameWindow(
@@ -587,7 +940,7 @@ async function selectOption(session: SessionRecord, index: number): Promise<stri
   const ids = session.slots.pickIds ?? [];
   const id = ids[index - 1];
   const offer = session.offers?.find((o) => o.id === id);
-  if (!offer) return ['I lost track of which option that was — reply *1*, *2* or *3* and I\'ll lock it in.'];
+  if (!offer) return [`There's no option ${index} on the list — ${pickPrompt(ids.length || 3)} and I'll lock it in.`];
 
   session.selectedOfferId = offer.id;
   await getStore().insertEvent({
@@ -614,7 +967,7 @@ async function selectOption(session: SessionRecord, index: number): Promise<stri
 function pickLine(session: SessionRecord, index: number): string {
   const offer = selectedOffer(session)!;
   const picks = session.slots.pickIds ?? [];
-  const label = (['CHEAPEST', 'FASTEST', 'BEST_VALUE'] as const)[picks.indexOf(offer.id)] ?? 'BEST_VALUE';
+  const label = session.slots.pickLabels?.[picks.indexOf(offer.id)] ?? 'BEST_VALUE';
   const pick: RankedPick = { label, offer, score: 0, whyThisOne: '' };
   return selectionMessage(pick, session.slots.trip);
 }
@@ -624,7 +977,7 @@ function pickLine(session: SessionRecord, index: number): string {
 async function collectPassenger(session: SessionRecord, d: TurnDecision): Promise<string[]> {
   if (d.intent === 'DENY' && !Object.values(d.passenger).some(Boolean)) {
     session.state = 'AWAITING_SELECTION';
-    return ['No problem — here are your options again.', ...presentOptions(session)];
+    return presentOptions(session, { lead: 'No problem — here are your options again 👇' });
   }
 
   const draft = session.slots.draftPassenger;
@@ -682,7 +1035,7 @@ function confirmationMessage(session: SessionRecord): string {
 async function confirming(session: SessionRecord, d: TurnDecision): Promise<string[]> {
   if (d.intent === 'DENY') {
     session.state = 'AWAITING_SELECTION';
-    return ['No problem — nothing has been booked. Here are the options again.', ...presentOptions(session)];
+    return presentOptions(session, { lead: 'No problem — nothing has been booked. Here are the options again 👇' });
   }
 
   // New passenger details at this point are a correction, not a confirmation.
@@ -742,7 +1095,7 @@ async function issueBooking(session: SessionRecord): Promise<string[]> {
 
 // ── after the booking ────────────────────────────────────────────────────────
 
-async function completed(session: SessionRecord, d: TurnDecision): Promise<string[]> {
+async function completed(session: SessionRecord, d: TurnDecision, ctx: TurnCtx): Promise<string[]> {
   if (d.trip.origin || d.trip.destination || d.trip.departDate) {
     const ref = session.slots.bookingRef;
     resetTrip(session);
@@ -751,7 +1104,7 @@ async function completed(session: SessionRecord, d: TurnDecision): Promise<strin
     if (ambiguity) return [ambiguity];
     const missing = missingTripSlots(session.slots.trip);
     const lead = ref ? `Sure — ${ref} is all set. New trip:` : 'Sure —';
-    if (!missing.length) return [...(await runSearch(session))];
+    if (!missing.length) return runSearch(session, ctx);
     return [`${lead} ${askFor(session, missing)}`];
   }
 
@@ -914,6 +1267,7 @@ async function completePendingHandoff(
       session.slots.pendingHandoffEmail = undefined;
       session.control = 'BOT';
       session.state = resumeStateFor(session);
+      session.slots.offeredToResume = true;
       await saveSession(session);
       await channel.send(
         session.channelUserId,
@@ -921,6 +1275,15 @@ async function completePendingHandoff(
           `Shall we carry on with your trip?`,
       );
       return true;
+    }
+    // Someone who asked for a person is waiting for one: their message goes to
+    // the agent. But when it was the *bot* that handed off, a user who just
+    // carries on with their trip should get the bot back, not silence — the
+    // ticket stays open for the human either way.
+    if (pending.reason !== 'USER_REQUESTED_HUMAN') {
+      session.slots.pendingHandoffEmail = undefined;
+      session.control = 'BOT';
+      session.state = resumeStateFor(session);
     }
     return false; // not an email and not a refusal — fall through to normal handling
   }
@@ -939,6 +1302,7 @@ async function completePendingHandoff(
   session.slots.pendingHandoffEmail = undefined;
   session.control = 'BOT';
   session.state = resumeStateFor(session);
+  session.slots.offeredToResume = true;
   await saveSession(session);
 
   await channel.send(
@@ -949,7 +1313,7 @@ async function completePendingHandoff(
           `I can carry on helping with your trip here in the meantime — want me to?`
       : // Never claim an email was sent when it wasn't.
         `I couldn't get an email through to ${email} just now — ticket *${pending.ticket}* is still open ` +
-          `and our team has your details, so they'll reach you.\n\n` +
+          `and our team has your details, so they'll reach you here on WhatsApp.\n\n` +
           `I can carry on helping with your trip here in the meantime — want me to?`,
   );
   return true;

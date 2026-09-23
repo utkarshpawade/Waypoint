@@ -44,6 +44,12 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
+      # Free Render instances cannot reach SMTP ports; this HTTPS API can.
+      - key: BREVO_API_KEY
+        sync: false
+      # Set FLIGHT_PROVIDER=skyscanner above to use it.
+      - key: RAPIDAPI_KEY
+        sync: false
       - key: ADMIN_TOKEN
         generateValue: true
       - key: OWNER_WHATSAPP

@@ -20,7 +20,14 @@ console.log(`\n${offers.length} offers for ${origin} → ${destination} on ${q.d
 for (const p of topThree(offers)) {
   const seg = p.offer.outbound.segments[0];
   const last = p.offer.outbound.segments.at(-1)!;
-  const label = { CHEAPEST: '💰 Cheapest', FASTEST: '⚡ Fastest', BEST_VALUE: '⭐ Best value' }[p.label];
+  const label = {
+    CHEAPEST: p.alsoFastest ? '💰 Cheapest & quickest' : '💰 Cheapest',
+    FASTEST: '⚡ Fastest',
+    BEST_VALUE: '⭐ Best value',
+    ALTERNATIVE: '✈️ Also good',
+    ONLY: '✅ Your match',
+    CLOSEST: '🕒 Closest to your time',
+  }[p.label];
   console.log(`${label} — ${formatINR(p.offer.price.total)} (score ${p.score.toFixed(3)})`);
   console.log(
     `  ${seg.carrierName} ${seg.flightNumber} · ${seg.departISO.slice(11, 16)} → ${last.arriveISO.slice(11, 16)}` +

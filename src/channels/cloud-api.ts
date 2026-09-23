@@ -171,6 +171,8 @@ export class CloudApiChannel implements Channel {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      // The send chain is shared by every chat; one hung request must not stall it.
+      signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: { message?: string; code?: number } };

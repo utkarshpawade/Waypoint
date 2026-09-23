@@ -42,6 +42,8 @@ export interface RulesResult {
     correction: boolean;
     pastDate: boolean;
     greeting: boolean;
+    /** "show all", "any time is fine" — drop the filters on the current results. */
+    clearFilters: boolean;
   };
 }
 
@@ -270,8 +272,9 @@ export function extractTripSlots(text: string, now?: DateTime): Partial<TripSlot
   if (/\b(non[- ]?stop|nonstop|direct|no (layover|stops?|connection))\b/.test(lower)) slots.nonStopOnly = true;
   if (/\b(any|with) (stops?|layovers?)\b|\bstops are (fine|ok)\b/.test(lower)) slots.nonStopOnly = false;
 
-  const win = extractDepartWindow(lower);
-  if (win) slots.departWindow = win;
+  const windows = extractTimeWindows(lower);
+  if (windows.depart) slots.departWindow = windows.depart;
+  if (windows.arrive) slots.arriveWindow = windows.arrive;
 
   return slots;
 }
@@ -293,30 +296,137 @@ export function extractBudget(lower: string): number | undefined {
   return value >= 500 ? Math.round(value) : undefined;
 }
 
-export function extractDepartWindow(lower: string): { earliest?: string; latest?: string } | undefined {
-  if (/\b(early morning|red[- ]?eye)\b/.test(lower)) return { earliest: '00:00', latest: '08:00' };
-  if (/\bmorning\b/.test(lower)) return { earliest: '05:00', latest: '12:00' };
-  if (/\bafternoon\b/.test(lower)) return { earliest: '12:00', latest: '17:00' };
-  if (/\bevening\b/.test(lower)) return { earliest: '17:00', latest: '21:00' };
-  if (/\b(night|late)\b/.test(lower)) return { earliest: '20:00', latest: '23:59' };
+type Window = { earliest?: string; latest?: string };
 
-  const after = /\bafter\s+(\d{1,2})\s*(am|pm)?\b/.exec(lower);
-  const before = /\bbefore\s+(\d{1,2})\s*(am|pm)?\b/.exec(lower);
-  if (after || before) {
-    const w: { earliest?: string; latest?: string } = {};
-    if (after) w.earliest = to24h(Number(after[1]), after[2]);
-    if (before) w.latest = to24h(Number(before[1]), before[2]);
-    return w;
-  }
-  return undefined;
+const NAMED_WINDOWS: [RegExp, Window][] = [
+  [/\b(early morning|red[- ]?eye)\b/, { earliest: '00:00', latest: '08:00' }],
+  [/\bmorning\b/, { earliest: '05:00', latest: '12:00' }],
+  [/\bafternoon\b/, { earliest: '12:00', latest: '17:00' }],
+  [/\bevening\b/, { earliest: '17:00', latest: '21:00' }],
+  [/\b(night|late)\b/, { earliest: '20:00', latest: '23:59' }],
+];
+
+/** A clock time: "noon", "11am", "10:30 pm", "9". Never a count, a date or a price. */
+const TIME = String.raw`(noon|midday|midnight|\d{1,2}(?::\d{2}|\.\d{2}(?=\s*[ap]\.?m))?(?:\s*[ap]\.?m\.?)?(?:\s*o'?clock)?)(?![\d/])(?!\s*(?:st|nd|rd|th|adults?|people|pax|passengers?|kids?|child|children|stops?|hours?|hrs?|h|mins?|minutes?|days?|k|thousand|lakh|kg|seats?)\b)`;
+const BOUND_RE = new RegExp(
+  String.raw`\b(before|by|until|till|no later than|not later than|latest by|after|from|post)\s+(?:the\s+)?${TIME}`,
+  'g',
+);
+const BETWEEN_RE = new RegExp(String.raw`\bbetween\s+${TIME}\s+(?:and|to|-)\s+${TIME}`);
+
+/** Words that make a time constraint about landing rather than leaving. */
+const ARRIVE_CUE = /\b(reach\w*|arriv\w*|land\w*|touch ?down|get(?:ting)? (?:there|in|to)|be (?:in|there|at))\b/g;
+const DEPART_CUE = /\b(depart\w*|leav\w*|take ?off|takeoff|fly(?:ing)? out|flight at)\b/g;
+
+function lastIndex(re: RegExp, text: string): number {
+  let at = -1;
+  for (const m of text.matchAll(re)) at = m.index ?? at;
+  return at;
 }
 
-function to24h(hour: number, meridiem?: string): string {
-  let h = hour;
-  if (meridiem === 'pm' && h < 12) h += 12;
-  if (meridiem === 'am' && h === 12) h = 0;
-  if (!meridiem && h <= 7) h += 12; // "before 6" almost always means 6pm
-  return `${String(h % 24).padStart(2, '0')}:00`;
+/** Arrival if the nearest cue before the time phrase is an arrival word. */
+function isArrival(before: string, after: string): boolean {
+  const window = before.slice(-45);
+  const arrive = lastIndex(ARRIVE_CUE, window);
+  const depart = lastIndex(DEPART_CUE, window);
+  if (arrive > depart) return true;
+  if (depart > arrive) return false;
+  return /^\s*(arrival|landing)\b/.test(after);
+}
+
+/** "noon" → 12:00, "10:30pm" → 22:30, "before 6" → 18:00. */
+export function toClock(raw: string, bound: 'earliest' | 'latest'): string | undefined {
+  const t = raw.trim().toLowerCase();
+  if (t === 'noon' || t === 'midday') return '12:00';
+  if (t === 'midnight') return bound === 'latest' ? '23:59' : '00:00';
+  const m = /^(\d{1,2})(?:[:.](\d{2}))?\s*([ap])?/.exec(t);
+  if (!m) return undefined;
+  let h = Number(m[1]);
+  const min = Number(m[2] ?? 0);
+  const meridiem = m[3];
+  if (h > 23 || min > 59) return undefined;
+  if (meridiem === 'p' && h < 12) h += 12;
+  if (meridiem === 'a' && h === 12) h = 0;
+  if (!meridiem && !m[2] && h >= 1 && h <= 7) h += 12; // "before 6" almost always means 6pm
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+/**
+ * Time constraints, split by what they constrain.
+ *
+ *   "tomorrow morning"                  → depart 05:00–12:00
+ *   "non stop and reaching before noon" → arrive by 12:00
+ *   "leave after 6pm, land by 11"       → depart from 18:00, arrive by 23:00
+ *   "be in Goa by 10:30am"              → arrive by 10:30
+ *
+ * A time with no cue either way is a departure — "flights before noon" is how
+ * people ask for morning departures.
+ */
+export function extractTimeWindows(lower: string): { depart?: Window; arrive?: Window } {
+  const depart: Window = {};
+  const arrive: Window = {};
+  let rest = lower;
+
+  const between = BETWEEN_RE.exec(lower);
+  if (between) {
+    const after = lower.slice(between.index + between[0].length);
+    const target = isArrival(lower.slice(0, between.index), after) ? arrive : depart;
+    // "between 6 and 10am" — the first time borrows the second's meridiem.
+    const suffix = /[ap]\.?m/.exec(between[2])?.[0] ?? '';
+    const first = /[ap]\.?m|noon|midday|midnight/.test(between[1]) ? between[1] : `${between[1]}${suffix}`;
+    target.earliest = toClock(first, 'earliest');
+    target.latest = toClock(between[2], 'latest');
+    rest = rest.replace(between[0], ' ');
+  }
+
+  let bareArrivalHour = false;
+  for (const m of rest.matchAll(BOUND_RE)) {
+    const bound = /^(after|from|post)$/.test(m[1]) ? 'earliest' : 'latest';
+    const clock = toClock(m[2], bound);
+    if (!clock) continue;
+    const target = isArrival(rest.slice(0, m.index), rest.slice(m.index! + m[0].length)) ? arrive : depart;
+    target[bound] = clock;
+    if (target === arrive && bound === 'latest') bareArrivalHour = /^\d{1,2}$/.test(m[2].trim());
+  }
+  rest = rest.replace(BOUND_RE, ' ');
+
+  // "leave after 6pm, land by 11" — a bare hour that would land before the
+  // flight leaves can only mean the evening one.
+  if (bareArrivalHour && depart.earliest && arrive.latest && arrive.latest <= depart.earliest && arrive.latest < '12:00') {
+    arrive.latest = `${String(Number(arrive.latest.slice(0, 2)) + 12).padStart(2, '0')}${arrive.latest.slice(2)}`;
+  }
+
+  // Named parts of the day. One attached to an arrival cue is an arrival
+  // window ("reach by evening"), and is removed before the departure pass so
+  // "reaching goa in the morning" does not also filter departures.
+  for (const [re, win] of NAMED_WINDOWS) {
+    const m = re.exec(rest);
+    if (!m) continue;
+    const before = rest.slice(0, m.index);
+    if (isArrival(before, rest.slice(m.index + m[0].length))) {
+      if (!arrive.earliest && !arrive.latest) {
+        Object.assign(arrive, /\b(by|before)\s+(the\s+)?$/.test(before) ? { latest: win.latest } : win);
+      }
+      rest = `${before} ${rest.slice(m.index + m[0].length)}`;
+    }
+  }
+  if (!depart.earliest && !depart.latest) {
+    for (const [re, win] of NAMED_WINDOWS) {
+      if (re.test(rest)) {
+        Object.assign(depart, win);
+        break;
+      }
+    }
+  }
+
+  const out: { depart?: Window; arrive?: Window } = {};
+  if (depart.earliest || depart.latest) out.depart = depart;
+  if (arrive.earliest || arrive.latest) out.arrive = arrive;
+  return out;
+}
+
+export function extractDepartWindow(lower: string): Window | undefined {
+  return extractTimeWindows(lower).depart;
 }
 
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
@@ -434,7 +544,18 @@ const HUMAN_RE =
 const FRUSTRATION_RE =
   /\b(useless|stupid|terrible|awful|ridiculous|frustrat\w*|annoy\w*|wtf|not working|you (don'?t|dont) understand|i already (said|told)|for the (third|3rd|last) time|waste of time)\b|[!?]{3,}/i;
 
-const CORRECTION_RE = /\b(no,|nope|not that|i (said|meant)|actually|change that|wrong|instead)\b/i;
+/**
+ * The user correcting the *bot* ("no, I said Mumbai"), not changing their own
+ * plan. "Actually make it Friday" and "Chennai instead" are ordinary edits —
+ * counting them once escalated a user for refining their search twice.
+ */
+const CORRECTION_RE = /\b(no,|nope|not that|i (said|meant)|wrong|that'?s not what)\b/i;
+
+const CLEAR_FILTERS_RE =
+  /\b(show (me )?(all|everything)|all (the )?(flights|options)|clear (the |all )?filters?|remove (the |all )?filters?|reset (the )?filters?|any ?time( is (fine|ok))?|no (time )?preference)\b/i;
+
+/** Reads as a question rather than an instruction. */
+const QUESTION_RE = /\?\s*$|^\s*(what|how|can|could|do|does|is|are|will|when|which|why)\b/i;
 
 const GREET_RE = /^\s*(hi+|hey+|hello+|yo|good (morning|afternoon|evening)|namaste|hola)\b/i;
 
@@ -485,6 +606,7 @@ export function interpretRules(
     correction: CORRECTION_RE.test(trimmed),
     pastDate: Boolean(trip.departDate && isPastDate(trip.departDate, now)),
     greeting: GREET_RE.test(trimmed),
+    clearFilters: CLEAR_FILTERS_RE.test(trimmed),
   };
 
   const filledTrip = Object.keys(trip).length;
@@ -513,9 +635,19 @@ export function interpretRules(
   } else if (filledTrip >= 1 && (route.origin || route.destination || trip.departDate)) {
     intent = 'PROVIDE_TRIP';
     confidence = filledTrip >= 3 ? 0.9 : filledTrip >= 2 ? 0.75 : 0.6;
-  } else if (ctx.hasOffers && filledTrip >= 1) {
+  } else if (FAQ_RE.test(trimmed) && QUESTION_RE.test(trimmed)) {
+    // "what is the baggage on business class" names a cabin, but it is a
+    // question about the rules, not a change to the search.
+    intent = 'FAQ';
+    confidence = 0.6;
+  } else if (ctx.hasOffers && (filledTrip >= 1 || flags.clearFilters)) {
     intent = 'REFINE';
-    confidence = 0.7;
+    confidence = filledTrip >= 1 ? 0.75 : 0.7;
+  } else if (filledTrip >= 1 && !ctx.expectingPassenger) {
+    // A constraint with no city or date yet — "non-stop, landing before noon" —
+    // is still trip information, and collecting it is the whole job.
+    intent = 'PROVIDE_TRIP';
+    confidence = 0.6;
   } else if (CONFIRM_RE.test(trimmed)) {
     intent = 'CONFIRM';
     confidence = 0.85;

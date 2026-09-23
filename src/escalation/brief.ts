@@ -47,7 +47,8 @@ Recent transcript:
 ${transcript}`,
         },
       ],
-      1200,
+      // The user is waiting on the handoff message, and the brief has a template fallback.
+      { maxTokens: 1200, deadlineMs: 8_000 },
     );
 
     if (raw?.situation) {

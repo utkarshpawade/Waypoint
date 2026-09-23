@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { AmadeusProvider } from './amadeus.js';
 import { MockProvider } from './mock.js';
+import { SkyscannerProvider } from './skyscanner.js';
 import type { FlightOffer, FlightProvider, SearchQuery } from './types.js';
 
 const log = logger.child({ mod: 'flights' });
@@ -44,10 +45,18 @@ let provider: FlightProvider | null = null;
 export function getFlightProvider(): FlightProvider {
   if (!provider) {
     const mock = new MockProvider();
-    if (config.FLIGHT_PROVIDER === 'amadeus' && config.AMADEUS_CLIENT_ID && config.AMADEUS_CLIENT_SECRET) {
+    if (config.FLIGHT_PROVIDER === 'skyscanner' && config.RAPIDAPI_KEY) {
+      // Skyscanner polls airlines and agents, so give it longer than Amadeus;
+      // the user has already been told "Searching fares…" by then.
+      provider = new FallbackProvider(new SkyscannerProvider(15_000), mock, 18_000);
+      log.info('flight provider: skyscanner via rapidapi (mock fallback)');
+    } else if (config.FLIGHT_PROVIDER === 'amadeus' && config.AMADEUS_CLIENT_ID && config.AMADEUS_CLIENT_SECRET) {
       provider = new FallbackProvider(new AmadeusProvider(), mock);
       log.info('flight provider: amadeus (mock fallback)');
     } else {
+      if (config.FLIGHT_PROVIDER !== 'mock') {
+        log.warn({ wanted: config.FLIGHT_PROVIDER }, 'live flight provider selected but its keys are missing — using mock');
+      }
       provider = mock;
       log.info('flight provider: mock');
     }

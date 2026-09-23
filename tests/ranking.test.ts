@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { DateTime, Settings } from 'luxon';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyFilters,
+  arrivalMinutes,
   departComfortScore,
   explainPick,
   factorsFor,
   layoverQualityScore,
+  nearestPicks,
   rankOffers,
   scoreOffer,
   topThree,
@@ -25,7 +28,8 @@ function itin(opts: {
 }): Itin {
   const stops = opts.stops ?? 0;
   const depart = opts.depart;
-  const arrive = new Date(new Date(depart).getTime() + opts.durationMin * 60_000).toISOString();
+  // Same offset as the departure, as a real same-country itinerary would carry.
+  const arrive = DateTime.fromISO(depart, { setZone: true }).plus({ minutes: opts.durationMin }).toISO()!;
   return {
     segments: Array.from({ length: stops + 1 }, (_, i) => ({
       carrierCode: opts.carrier ?? '6E',
@@ -154,10 +158,37 @@ describe('topThree', () => {
     expect(picks.find((p) => p.label === 'CHEAPEST')!.offer.id).toBe('dom');
   });
 
-  it('survives a single-offer set without crashing', () => {
+  it('shows a single match once, as the match — never the same card three times', () => {
     const picks = topThree([CHEAP_SLOW]);
-    expect(picks).toHaveLength(3);
-    expect(picks.every((p) => p.offer.id === 'cheap')).toBe(true);
+    expect(picks).toHaveLength(1);
+    expect(picks[0].label).toBe('ONLY');
+  });
+
+  it('shows two cards for two offers, each flight once', () => {
+    const picks = topThree([CHEAP_SLOW, FAST_PRICEY]);
+    expect(picks.map((p) => p.offer.id)).toEqual(['cheap', 'fast']);
+    expect(picks.map((p) => p.label)).toEqual(['CHEAPEST', 'FASTEST']);
+  });
+
+  it('does not call a flight "fastest" when it is no quicker than the cheapest', () => {
+    // After a non-stop filter every option often takes the same 2h 28m. The old
+    // output labelled a pricier, equally long flight "⚡ Fastest".
+    const a = offer('a', 11_170, itin({ depart: '2026-01-10T14:15:00+05:30', durationMin: 148 }));
+    const b = offer('b', 11_570, itin({ depart: '2026-01-10T15:35:00+05:30', durationMin: 148 }));
+    const c = offer('c', 12_400, itin({ depart: '2026-01-10T07:05:00+05:30', durationMin: 150 }));
+    const picks = topThree([a, b, c]);
+    expect(picks.some((p) => p.label === 'FASTEST')).toBe(false);
+    expect(picks[0]).toMatchObject({ label: 'CHEAPEST', alsoFastest: true });
+    expect(new Set(picks.map((p) => p.offer.id)).size).toBe(picks.length);
+  });
+
+  it('never labels an option "best value" when a shown option beats it on price and time', () => {
+    const dominant = offer('dom', 5000, itin({ depart: '2026-01-10T09:00:00+05:30', durationMin: 120 }));
+    const worse = offer('worse', 8000, itin({ depart: '2026-01-10T11:00:00+05:30', durationMin: 200 }));
+    const worst = offer('worst', 9000, itin({ depart: '2026-01-10T13:00:00+05:30', durationMin: 500, stops: 1 }));
+    const labels = topThree([dominant, worse, worst]).map((p) => p.label);
+    expect(labels).not.toContain('BEST_VALUE');
+    expect(labels[0]).toBe('CHEAPEST');
   });
 
   it('returns nothing for an empty set', () => {
@@ -218,6 +249,44 @@ describe('refinement filters', () => {
 
   it('returns an empty set rather than throwing when nothing matches', () => {
     expect(applyFilters(SET, { maxPrice: 1 })).toEqual([]);
+  });
+
+  describe('on a server in another timezone', () => {
+    // Render runs in UTC. Reading "07:15+05:30" in the server's zone turned it
+    // into 01:45, so "morning" returned the afternoon flights.
+    afterEach(() => {
+      Settings.defaultZone = 'system';
+    });
+
+    it('filters on the airport clock, not the server clock', () => {
+      for (const zone of ['UTC', 'America/Los_Angeles', 'Asia/Tokyo']) {
+        Settings.defaultZone = zone;
+        expect(
+          applyFilters(SET, { departWindow: { earliest: '06:00', latest: '12:00' } }).map((o) => o.id),
+          zone,
+        ).toEqual(['fast', 'balanced']);
+      }
+    });
+  });
+
+  it('filters by landing time at the destination', () => {
+    // fast lands 13:00, balanced 14:45, cheap (3:30 + 10h) 13:30.
+    expect(applyFilters(SET, { arriveWindow: { latest: '13:15' } }).map((o) => o.id)).toEqual(['fast']);
+    expect(applyFilters(SET, { arriveWindow: { earliest: '14:00' } }).map((o) => o.id)).toEqual(['balanced']);
+  });
+
+  it('never counts a next-day landing as "before noon"', () => {
+    const redEye = offer('red', 5000, itin({ depart: '2026-01-10T23:00:00+05:30', durationMin: 150 }));
+    expect(arrivalMinutes(redEye.outbound)).toBe(1440 + 90);
+    expect(applyFilters([redEye], { arriveWindow: { latest: '12:00' } })).toEqual([]);
+  });
+
+  it('orders by closeness to the time asked for when nothing meets it', () => {
+    const picks = nearestPicks(SET, 'arrive', { latest: '09:00' });
+    expect(picks.map((p) => p.offer.id)).toEqual(['fast', 'cheap', 'balanced']);
+    expect(picks[0].label).toBe('CLOSEST');
+    expect(picks[0].whyThisOne).toMatch(/Lands at 13:00/);
+    expect(picks[1].whyThisOne).toMatch(/₹10,000 cheaper than the closest/);
   });
 });
 

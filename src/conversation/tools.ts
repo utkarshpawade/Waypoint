@@ -45,7 +45,10 @@ export const refineSearchArgs = z.object({
   maxPrice: z.number().positive().max(10_000_000).optional(),
   preference: z.enum(['CHEAPEST', 'FASTEST', 'BEST_VALUE', 'COMFORT']).optional(),
   departWindow: z.object({ earliest: hhmm.optional(), latest: hhmm.optional() }).optional(),
+  arriveWindow: z.object({ earliest: hhmm.optional(), latest: hhmm.optional() }).optional(),
   carrier: z.string().trim().min(2).max(3).optional(),
+  /** "show all" — drop every filter on the current results. */
+  reset: z.boolean().optional(),
 });
 
 export const selectFlightArgs = z.object({

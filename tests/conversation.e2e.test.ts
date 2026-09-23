@@ -413,6 +413,166 @@ describe('payment loop', () => {
   });
 });
 
+/** The option cards in a bot message, as the user reads them. */
+function cardsIn(text: string) {
+  return [
+    ...text.matchAll(/🛫 (\d{2}:\d{2}) [A-Z]{3} → 🛬 (\d{2}:\d{2})(⁺\d)? [A-Z]{3}\n⏱ [^·]+· (non-stop|\d stops?)/g),
+  ].map((m) => ({ depart: m[1], arrive: m[2], nextDay: Boolean(m[3]), nonStop: m[4] === 'non-stop' }));
+}
+
+describe('the WhatsApp conversation that exposed the dumb-bot bugs', () => {
+  // The same turns a tester sent on WhatsApp, where the bot ignored "morning",
+  // ignored "reaching before noon", showed one flight twice, escalated a clear
+  // request to a human and then answered "Hi" with "reply 1, 2 or 3".
+
+  async function upToOptions() {
+    await say('Hi');
+    await say('I need a flight from Delhi to Goa');
+    return say('For tomorrow morning');
+  }
+
+  it('keeps "tomorrow morning" to morning departures — on a UTC server too', async () => {
+    const options = await upToOptions();
+    expect(options).toMatch(/departing 05:00–12:00/);
+    const cards = cardsIn(options);
+    expect(cards.length).toBeGreaterThan(0);
+    for (const c of cards) {
+      expect(c.depart >= '05:00' && c.depart <= '12:00', `${c.depart} is not a morning departure`).toBe(true);
+    }
+  });
+
+  it('applies "non stop and reaching before noon" to stops AND landing time, with no card twice', async () => {
+    await upToOptions();
+    const refined = await say('Give me only non stop flights and reaching before noon');
+    expect(refined).toMatch(/non-stop/);
+    expect(refined).toMatch(/landing by 12:00|lands by 12:00/);
+
+    const flights = refined.match(/\b[A-Z0-9]{2}-\d{2,4}\b/g) ?? [];
+    expect(new Set(flights).size).toBe(flights.length);
+
+    // Either every card meets both constraints, or the bot says plainly which
+    // one it could not meet — it never silently drops one.
+    if (!/Nothing|No non-stop/.test(refined)) {
+      for (const c of cardsIn(refined)) {
+        expect(c.nonStop).toBe(true);
+        expect(!c.nextDay && c.arrive <= '12:00', `lands ${c.arrive}`).toBe(true);
+      }
+    }
+  });
+
+  it('answers a restated deadline instead of shrugging, and never escalates it', async () => {
+    await upToOptions();
+    await say('Give me only non stop flights and reaching before noon');
+
+    const again = await say('I need a flight reaching before noon');
+    expect(again).not.toMatch(/didn't quite get|Reply \*1\*, \*2\* or \*3\* to pick one/);
+    expect(again).toMatch(/landing by 12:00/);
+
+    const third = await say('I need to reach before noon');
+    expect(third).not.toMatch(/Ticket/);
+    expect(await getStore().listEscalations()).toHaveLength(0);
+  });
+
+  it('greets a returning "Hi" with where the search stands', async () => {
+    await upToOptions();
+    const hi = await say('Hi');
+    expect(hi).toMatch(/Hi again/);
+    expect(hi).toMatch(/DEL → GOI/);
+    expect(hi).toMatch(/departing 05:00–12:00/);
+  });
+
+  it('keeps an email typed mid-search for the itinerary instead of ignoring it', async () => {
+    await upToOptions();
+    const noted = await say('mayank@example.com');
+    expect(noted).toMatch(/itinerary to mayank@example\.com/);
+    const session = await getStore().getSessionByChannelUser('memory', 'e2e-user');
+    expect(session!.slots.draftPassenger.email).toBe('mayank@example.com');
+  });
+});
+
+describe('handoffs the bot can come back from', () => {
+  it('brings the options back when the user says yes to carrying on', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    await say('I want to talk to a human');
+    const offer = await say('mayank@example.com');
+    expect(offer).toMatch(/want me to\?/);
+
+    const resumed = await say('yes');
+    expect(resumed).toMatch(/where we left off/);
+    expect(resumed).toMatch(/\*1\.\*/);
+  });
+
+  it('does not swallow the next trip request after a handoff the bot started', async () => {
+    await say('hi');
+    expect(await say('do i need a visa for dubai')).toMatch(/won't guess/i);
+    // The user ignores the email question and carries on planning.
+    const search = await say(`bangalore to dubai on ${DEPART}`);
+    expect(search).toMatch(/BLR → DXB/);
+  });
+
+  it('does not interrupt a user the bot is already helping with "still tied up"', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    await say('I want to talk to a human');
+    await say('mayank@example.com'); // the bot is talking to them again from here
+
+    const before = channel.sent.length;
+    expect(await runSlaSweep(Date.now() + 60 * 60_000)).toBe(1);
+    expect(channel.transcriptSince(before)).not.toMatch(/still tied up/);
+  });
+
+  it('does not treat changing your mind twice as frustration', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    await say(`actually make it chennai to goa on ${DEPART}`);
+    const second = await say(`actually mumbai to goa instead, on ${DEPART}`);
+    expect(second).toMatch(/BOM → GOI/);
+    expect(await getStore().listEscalations()).toHaveLength(0);
+  });
+
+  it('asks before handing off: two unclear messages get help, not a ticket', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    expect(await say('hmm')).toMatch(/I can narrow these down/);
+    expect(await say('blah')).toMatch(/I can narrow these down/);
+    expect(await getStore().listEscalations()).toHaveLength(0);
+  });
+});
+
+describe('impossible constraints', () => {
+  it('says which constraint cannot be met and leads with the flight closest to it', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    const out = await say('non-stop, landing before 5am');
+    expect(out).toMatch(/lands by 05:00/);
+    expect(out).toMatch(/Closest to your time/);
+    expect(out).toMatch(/the closest lands at \d{2}:\d{2}/);
+  });
+
+  it('drops every filter on "show all"', async () => {
+    await say('hi');
+    await say(`delhi to goa on ${DEPART}`);
+    await say('non-stop only');
+    const all = await say('show all');
+    expect(all).toMatch(/no filters/);
+    const session = await getStore().getSessionByChannelUser('memory', 'e2e-user');
+    expect(session!.slots.activeFilters?.nonStopOnly).toBeFalsy();
+  });
+});
+
+describe('one turn at a time', () => {
+  it('does not lose a message sent while the previous one is still being handled', async () => {
+    // WhatsApp delivers "delhi to goa" / "<date>" as separate events. Handled
+    // concurrently, the second turn saved over the first and the route was lost.
+    await Promise.all([channel.userSays('delhi to goa', 'burst'), channel.userSays(`on ${DEPART}`, 'burst')]);
+    const session = await getStore().getSessionByChannelUser('memory', 'burst');
+    expect(session!.slots.trip.origin).toBe('DEL');
+    expect(session!.slots.trip.departDate).toBeDefined();
+    expect(session!.offers?.length).toBeGreaterThan(0);
+  });
+});
+
 describe('outbound verification', () => {
   const offers = [
     {

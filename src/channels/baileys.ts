@@ -19,6 +19,7 @@ const waLogger = pino({ level: 'warn' }) as any;
 
 const MAX_CHARS = 3500;
 const PER_CHAT_GAP_MS = 800;
+const SEND_TIMEOUT_MS = 30_000;
 
 type ConnState = 'closed' | 'connecting' | 'open';
 
@@ -248,10 +249,13 @@ export class BaileysChannel implements Channel {
     this.sendChain = this.sendChain.then(async () => {
       for (const chunk of chunks) {
         try {
-          await this.sendTyping(to);
+          // Every step is bounded. This chain is shared by every chat, so one
+          // send that never settles (a socket that died mid-reconnect) would
+          // otherwise silence the bot for everyone until the next restart.
+          await withTimeout(this.sendTyping(to), 5_000, 'typing');
           await sleep(humanDelay(chunk.length));
-          await this.sock?.sendMessage(to, { text: chunk });
-          await this.sock?.sendPresenceUpdate('paused', to);
+          await withTimeout(this.sock?.sendMessage(to, { text: chunk }), SEND_TIMEOUT_MS, 'sendMessage');
+          await withTimeout(this.sock?.sendPresenceUpdate('paused', to), 5_000, 'presence');
           log.info({ to: maskId(to), len: chunk.length }, 'outbound');
         } catch (err) {
           log.error({ err, to: maskId(to) }, 'send failed');
@@ -275,6 +279,17 @@ export class BaileysChannel implements Channel {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function withTimeout<T>(p: Promise<T> | undefined, ms: number, what: string): Promise<T | undefined> {
+  if (!p) return Promise.resolve(undefined);
+  let timer: NodeJS.Timeout;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 /** 600–1200ms scaled to length: feels human, and throttles us. */

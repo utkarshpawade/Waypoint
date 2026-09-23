@@ -22,11 +22,19 @@ const schema = z.object({
   SMTP_USER: z.string().default(''),
   SMTP_PASS: z.string().default(''),
   MAIL_FROM: z.string().default('Waypoint Travel <no-reply@waypoint.local>'),
+  /**
+   * Brevo's HTTPS email API. Preferred over SMTP when set: Render's free tier
+   * blocks outbound SMTP ports (25/465/587), so on Render SMTP simply times out.
+   */
+  BREVO_API_KEY: z.string().default(''),
 
   // Flights
-  FLIGHT_PROVIDER: z.enum(['mock', 'amadeus']).default('mock'),
+  FLIGHT_PROVIDER: z.enum(['mock', 'amadeus', 'skyscanner']).default('mock'),
   AMADEUS_CLIENT_ID: z.string().default(''),
   AMADEUS_CLIENT_SECRET: z.string().default(''),
+  /** RapidAPI key, subscribed to the Skyscanner ("Sky Scrapper") API. */
+  RAPIDAPI_KEY: z.string().default(''),
+  RAPIDAPI_SKYSCANNER_HOST: z.string().default('sky-scrapper.p.rapidapi.com'),
 
   // App
   PORT: z.coerce.number().int().positive().default(3000),
@@ -83,6 +91,7 @@ export const config = {
   hasLlm: env.LLM_API_KEY.length > 0,
   hasDb: env.DATABASE_URL.length > 0,
   hasSmtp: env.SMTP_HOST.length > 0 && env.SMTP_USER.length > 0 && env.SMTP_PASS.length > 0,
+  hasBrevo: env.BREVO_API_KEY.length > 0,
   hasCloudApi: env.WA_CLOUD_TOKEN.length > 0 && env.WA_CLOUD_PHONE_NUMBER_ID.length > 0,
   /** Digits only, so "+91 98765 43210" and "919876543210" are the same entry. */
   allowedSenders: env.ALLOWED_SENDERS.split(',')

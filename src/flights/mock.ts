@@ -170,7 +170,9 @@ function priceFor(
 ): number {
   const base = 1800 + distanceKm * 3.2;
 
-  const depart = DateTime.fromISO(itin.segments[0].departISO);
+  // setZone: the red-eye and weekend factors are about the airport's clock,
+  // not the server's.
+  const depart = DateTime.fromISO(itin.segments[0].departISO, { setZone: true });
   const daysOut = Math.max(0, Math.ceil(depart.diffNow('days').days));
   const leadMultiplier = daysOut < 3 ? 1.55 : daysOut < 7 ? 1.3 : daysOut < 21 ? 1.1 : 1.0;
 

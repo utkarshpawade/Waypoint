@@ -1,6 +1,7 @@
 /**
- * Proves SMTP works before it matters. Run this the moment credentials exist —
- * not at 11pm on submission night.
+ * Proves email works before it matters. Run this the moment credentials exist —
+ * not at 11pm on submission night. It uses the same transport the bot will:
+ * Brevo's HTTPS API when BREVO_API_KEY is set, SMTP otherwise.
  *
  *   npm run email:test -- you@example.com
  */
@@ -16,16 +17,24 @@ if (!to) {
   process.exit(1);
 }
 
-console.log(`SMTP host: ${config.SMTP_HOST || '(not set)'}  user: ${config.SMTP_USER || '(not set)'}`);
+console.log(
+  config.hasBrevo
+    ? `Transport: Brevo API  from: ${config.MAIL_FROM}`
+    : `Transport: SMTP  host: ${config.SMTP_HOST || '(not set)'}  user: ${config.SMTP_USER || '(not set)'}`,
+);
 
 const check = await verifyEmail();
 if (!check.ok) {
-  console.error(`✖ SMTP verification failed: ${check.error}`);
-  console.error('  Gmail: enable 2-Step Verification, then create an App Password.');
-  console.error('  Blocked or spam-foldered? Swap SMTP_* for a Brevo relay — same code path.');
+  console.error(`✖ Email verification failed: ${check.error}`);
+  if (check.via === 'brevo') {
+    console.error('  Check BREVO_API_KEY (Brevo → SMTP & API → API keys).');
+  } else {
+    console.error('  Gmail: enable 2-Step Verification, then create an App Password.');
+    console.error('  On Render\'s free tier SMTP is blocked outright — set BREVO_API_KEY instead.');
+  }
   process.exit(1);
 }
-console.log('✔ SMTP connection verified');
+console.log(`✔ ${check.via === 'brevo' ? 'Brevo key' : 'SMTP connection'} verified`);
 
 const departDate = DateTime.now().plus({ days: 14 }).toISODate()!;
 const offer = generateOffers({
@@ -71,5 +80,6 @@ if (result.ok) {
   console.log('  Check the inbox AND the spam folder. Open it on a phone — that is where it will be read.');
 } else {
   console.error(`✖ Send failed: ${result.error}`);
+  if (config.hasBrevo) console.error('  Brevo 400? MAIL_FROM must be a sender verified in Brevo (Senders & IP → Senders).');
   process.exit(1);
 }

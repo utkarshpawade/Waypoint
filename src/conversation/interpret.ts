@@ -10,6 +10,12 @@ import { isToolName, type ToolName } from './tools.js';
 
 const log = logger.child({ mod: 'interpret' });
 
+/**
+ * The model is on the critical path of a WhatsApp reply. Past this, the rules
+ * answer alone — a slightly dumber reply now beats a perfect one never.
+ */
+const LLM_DEADLINE_MS = 9_000;
+
 export interface TurnDecision {
   intent: Intent;
   confidence: number;
@@ -54,6 +60,11 @@ export async function interpretTurn(
   text: string,
   history: { author: string; body: string }[],
 ): Promise<TurnDecision> {
+  // The inbound message is already stored, so it is the last history entry.
+  // Sending it twice makes the model think the user repeated themselves.
+  const last = history.at(-1);
+  const prior = last && last.author === 'USER' && last.body === text ? history.slice(0, -1) : history;
+
   const rules = interpretRules(text, {
     state: session.state,
     expectingPassenger: session.state === 'COLLECTING_PASSENGER' || session.state === 'CONFIRMING',
@@ -77,13 +88,13 @@ export async function interpretTurn(
     const messages = [
       { role: 'system' as const, content: systemPrompt(session, stateGuidanceFor(session.state)) },
       { role: 'system' as const, content: contextBlock(session) },
-      ...history.slice(-8).map((m) => ({
+      ...prior.slice(-8).map((m) => ({
         role: (m.author === 'USER' ? 'user' : 'assistant') as 'user' | 'assistant',
         content: m.body,
       })),
       { role: 'user' as const, content: text },
     ];
-    const raw = await llm.chatJson<LlmShape>(messages);
+    const raw = await llm.chatJson<LlmShape>(messages, { deadlineMs: LLM_DEADLINE_MS });
     if (!raw) return decision;
     return mergeLlm(decision, raw, rules, text);
   } catch (err) {
@@ -103,8 +114,11 @@ export function mergeLlm(base: TurnDecision, raw: LlmShape, rules: RulesResult, 
   }
 
   if (typeof raw.confidence === 'number' && raw.confidence >= 0 && raw.confidence <= 1) {
-    // Trust the lower of the two — an honest floor beats an optimistic model.
-    out.confidence = Math.min(raw.confidence, Math.max(base.confidence, 0.5));
+    // The model reads free text far better than the regexes do, so its own
+    // confidence stands. Capping it at the rules' level (as this once did)
+    // meant every sentence the regexes missed counted as "unreadable", and two
+    // in a row escalated a perfectly clear request to a human.
+    out.confidence = raw.confidence;
     if (rules.intent === 'REQUEST_HUMAN' || rules.selection) out.confidence = base.confidence;
   }
 
@@ -184,9 +198,26 @@ export function mergeTrip(
   if (out.nonStopOnly === undefined && typeof llmSlots.nonStopOnly === 'boolean') {
     out.nonStopOnly = llmSlots.nonStopOnly;
   }
+  for (const key of ['departWindow', 'arriveWindow'] as const) {
+    if (out[key] !== undefined) continue;
+    const w = timeWindow(llmSlots[key]);
+    if (w) out[key] = w;
+  }
   if (out.tripType === undefined && (out.returnDate || llmSlots.returnDate)) out.tripType = 'ROUND_TRIP';
 
   return out;
+}
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** A model-supplied {earliest, latest} survives only if its times are real HH:mm. */
+export function timeWindow(v: unknown): { earliest?: string; latest?: string } | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const { earliest, latest } = v as Record<string, unknown>;
+  const w: { earliest?: string; latest?: string } = {};
+  if (typeof earliest === 'string' && HHMM.test(earliest)) w.earliest = earliest;
+  if (typeof latest === 'string' && HHMM.test(latest)) w.latest = latest;
+  return w.earliest || w.latest ? w : undefined;
 }
 
 export function mergePassenger(rulesDraft: PassengerDraft, llmDraft: Record<string, unknown>): PassengerDraft {
